@@ -1,0 +1,615 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Integration of samplegroups from each replicate per sample 
+output:
+  html_notebook:
+    df_print: paged
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+
+# Project summary (from ASF proposal):
+
+An in vitro model of human cortical neuronal differentiation used in the lab indicated neural progenitors start to differentiate into post-mitotic neurons after day 15 of neural induction. As a result, immunostaining analyses revealed a heterogenous population of cells (actively-dividing neural progenitors and post-mitotic neurons) at day 20. 
+
+Single-cell RNAseq analysis (performed by Stephanie Strohbuecker) of previously submitted wild-type neuronal cells at day 20 revealed an ASCL1-enriched population of cells, which express neural progenitor specific markers, and are found in the G1 phase of the cell cycle, while upregulating cell cycle exit genes (e.g. GADD45G, CDKN1C). Furthermore, this population was also enriched for markers of differentiating neural progenitors (e.g. SOX4, HES6, DLL1), suggesting ASCL1 is upregulated in progenitors just prior to terminal differentiation. RNA velocity analysis further supported this view. 
+
+Additional time-course experiment performed in the lab revealed the ASCL1 expression pattern during human cortical neuronal differentiation. At both the RNA and protein level, ASCL1 shows a progressive increase in expression after day 15 of neuronal differentiation, with a main peak at day 24, which coincides with 24 hours post Notch inhibition. DAPT was added at day 23 to synchronise the culture and make the vast majority of progenitors to exit the cell cycle and differentiate into neurons, corroborating the single-cell RNAseq findings at day 20. 
+
+For the current experiment, three wild-type and three ASCL1 knockout iPSC clones will undergo cortical neuronal differentiation. This time, cells will be collected at day 24, the time point when ASCL1 is highest expressed. With regards to only the wild-type cells, we would like to repeat the day 20 analyses performed by Stephanie on this later timepoint to show the existence of this ASCL1-eriched population (as we have other experiments conducted at this timepoint we wish to support). Secondly, we would like to compare wild-type cells at day 24 with and without Notch inhibitor treatment, to show that DAPT treatment results in a shift to a more homogenous population of ASCL1-positive cells that have the same identity as the ones identified in the absence of Notch inhibition. 
+
+Secondarily,  we would like to determine differentially expressed genes in cortical neuronal cultures at day 24 generated from wild-type versus ASCL1 knockout iPSCs to determine if the neurons formed from ASCL1 knockout cells are different from wild-type cells, since the controls (day 24 cells with DAPT) can be shared for both purposes. 
+
+
+
+
+```{r}
+RMD_file_name <- "2-1.Integration_of_sampleGroups_remDblt"
+```
+
+```{r}
+options(future.globals.maxSize = 96 * 1024^3, future.rng.onMisuse="ignore")
+```
+
+
+```{r eval=FALSE}
+library(reticulate)
+use_condaenv("leidenAlg_for_seuratv4")
+```
+
+
+# Libraries
+```{r message=FALSE}
+library(magrittr)
+library(here)
+
+library(ggpubr)
+
+library(Seurat)
+
+library(clustree)
+library(tidyverse)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+
+```{r, eval=TRUE}
+seurat_list <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+      "1-1.QC_Alevin_quant",
+      "seurat_object_list_filtered_processed2.RDS"
+    )
+  )
+
+# load(str_c(output_dirs["R_objects"], "object_list_anchors.RData", sep = "/"))
+```
+
+```{r}
+# Path to output and figures directories
+
+output_dirs <-
+  str_c(here(),
+        "data/derived_data",
+        c("Tables", "R_objects", "Figures"),
+        RMD_file_name,
+        sep = "/") %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+      generate_directories(.x))
+
+```
+
+After filtering the individual samples, we integrated the day 24 samples.
+For the integration, we followed the integration procedure available in [Seurat v4](https://satijalab.org/seurat/articles/integration_introduction.html). The available methods first identify cross-dataset pairs of cells that are in a matched biological state ("anchors").
+
+```{r}
+meta_data <- imap_dfr(seurat_list, function(seur_obj, seur_name) {
+  structure(unique(seur_obj$treatment), names =  unique(seur_obj$orig.ident)) %>%
+    enframe(name = "sample_id", value = "sample_info")
+}) %>%
+  separate(sample_info,
+           into = c("genotype", "treatment"),
+           sep = "_",
+           remove = FALSE) 
+```
+
+
+
+Before removing suspected doublets, we investigated the number of detected features and the number of reads detected per cell in doublets and singlets. In true doublets we would expect these parameters to be considerably higher than in singlets. This is shown in the density plots below. 
+We will retain the metadata of doublets (`scDblFinder.class`) for future interpretations/interrogations.
+
+```{r, fig.height=12, fig.width=24, message=FALSE, results='hide'}
+p <- imap(seurat_list, function(seur_obj, seur_name) {
+  df <- seur_obj[[]] %>%
+    as_tibble() %>%
+    select(scDblFinder.class,
+           nCount_RNA,
+           nFeature_RNA,
+           percent_mito)
+  ggarrange(
+    df %>%
+      ggplot(aes(x = percent_mito, colour = scDblFinder.class)) +
+      # geom_vline(xintercept = c(2, 15), color = "grey65") +
+      geom_density() +
+      labs(subtitle = "Density plot for percentage of expressed mitochondrial genes"),
+    df %>%
+      ggplot(aes(x = nFeature_RNA, colour = scDblFinder.class)) +
+      # geom_vline(xintercept = c(2, 15), color = "grey65") +
+      geom_density() +
+      labs(subtitle = "Density plot for the number of expressed features"),
+    df %>%
+      ggplot(aes(x = nCount_RNA, colour = scDblFinder.class)) +
+      # geom_vline(xintercept = c(2, 15), color = "grey65") +
+      geom_density() +
+      labs(subtitle = "Density plot for the number of reads per cell"),
+    ncol = 1, nrow = 3, align = "hv", common.legend = TRUE, legend = "right"
+  ) %>% 
+    annotate_figure(top = text_grob(seur_name, size = "18", face = "bold"))
+}) %>% 
+  ggarrange(plotlist = .)
+dev.off()
+p
+```
+
+```{r eval=TRUE, include=FALSE}
+seurat_list <- map(seurat_list, function(seur_obj) {
+  seur_obj <-
+    subset(seur_obj, subset = scDblFinder.class == "singlet")
+  seur_obj
+})
+```
+
+
+
+# Pre-processing and normalisation
+
+We use the "SCTransform" method for the normalisation and variance stabilisation described by [Hafemeister and Satija, 2019](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-019-1874-1). In comparison to the standard Seurat approach, sctransform returns 3000 variable features by default, instead of 2000.
+
+```{r}
+# glmGamPoi is used instead of method="poisson"
+seurat_list <- map(seurat_list, function(seur_obj){
+  seur_obj <- SCTransform(seur_obj, method = "glmGamPoi", verbose = FALSE)
+})
+```
+
+
+The `SCTransform()` function results are stored in a new assay within the seurat object (named "SCT"), with `counts` being (corrected) counts, data being `log1p(counts)` (`log1p()` computes the natural logarithm of the given value plus one), `scale.data` being pearson residuals.
+
+The residuals of the model of technical noise calculated by sctransform using "regularized negative binomial regression" represent normalized values which can be positive or negative. Positive residuals for a given gene in a given cell indicate that we observed more UMIs than expected given the gene's average expression in the population and cellular sequencing depth, while negative residuals indicate the reverse.
+
+The `scale.data` slot containing the residuals is used directly as input to PCA. For visualisation the Pearson residuals are converted back to "corrected" UMI counts. These corrected UMI counts can be interpreted as the UMI counts that would be expected if all cells were sequenced to the same depth (the log-normalised versions of the corrected counts are helpful for visualisation).
+
+## Cell Cycle stage scoring
+
+We performed cell cycle scoring to enable investigation/visualisation of cell cycle stages across the identified clusters.
+Seurat v4 provides a set of cell cycle genes that are used to assess the cell cylce stage of each cell.
+
+```{r}
+g2m <- cc.genes.updated.2019$g2m.genes
+print(str_c("Seurat v4 G2M cell cycle genes:",
+            str_c(g2m, collapse = ", "),
+            sep = " "))
+
+s_genes <- cc.genes.updated.2019$s.genes
+print(str_c(
+  "Seurat v4 S phase cell cycle genes:",
+  str_c(s_genes, collapse = ", "),
+  sep = " "
+)) 
+```
+
+```{r, comment=""}
+seurat_list <-
+  map(seurat_list, function(seur_obj) {
+    seur_obj@misc$feature_metadata <- seur_obj[["RNA"]][[]]
+    
+    seur_obj@misc$g2m_genes <- g2m
+    seur_obj@misc$s_genes <- s_genes
+    
+    seur_obj
+  })
+```
+
+```{r}
+seurat_list <- map(seurat_list, function(seur_obj) {
+  seur_obj <- CellCycleScoring(seur_obj, assay = "SCT", s.features = seur_obj@misc$s_genes, g2m.features = seur_obj@misc$g2m_genes)
+  seur_obj
+})
+```
+
+# Integration of datasets
+
+We would like to split the dataset into differernt condition groups before performing integration.
+```{r}
+seurat_list_grp <- meta_data %>% 
+  as_tibble() %>% 
+  mutate(sObj = seurat_list) %>% 
+  filter(genotype == "WT") %>% 
+  group_nest(genotype) %>% 
+  rename("type" = "genotype") %>% 
+  bind_rows(
+    meta_data %>% 
+    as_tibble() %>% 
+    mutate(sObj = seurat_list) %>% 
+    filter(treatment == "DAPT") %>% 
+    group_nest(treatment) %>% 
+    rename("type" = "treatment")
+  )
+  
+```
+
+```{r}
+seur_int.misc <- seurat_list_grp$data[[1]]$sObj[[1]]@misc
+```
+
+```{r}
+rm(seurat_list)
+```
+
+In a first step features are ranked by the number of datasets they are deemed variable in, breaking ties by the median variable feature rank across datasets. 
+```{r}
+seurat_list_grp <-
+  seurat_list_grp %>% 
+  mutate(features = map(data, ~SelectIntegrationFeatures(object.list = .x$sObj, nfeatures = 3000)))
+```
+
+```{r warning=FALSE}
+# Ensure that the sctransform residuals for the features specified are present in each object in the list (residuals are recomputed for missing features using the stored model parameters via the GetResidual() function)
+# subset the scale.data slot to only contain the residuals for anchor.features for efficiency in downstream processing
+seurat_list_grp <-
+  seurat_list_grp %>% 
+  mutate(data = map2(data, features,
+                    function(d, f) d %>% 
+                      mutate(sObj = PrepSCTIntegration(sObj, anchor.features = f, verbose = FALSE))))
+```
+
+
+```{r eval=TRUE}
+seurat_list_grp <-
+  seurat_list_grp %>% 
+  mutate(anchors = map2(data, features,
+                    function(d, f) FindIntegrationAnchors(d$sObj,
+                                                          normalization.method = "SCT",
+                                                          anchor.features = f,
+                                                          verbose = FALSE
+                                                        )
+  ))
+
+```
+
+
+```{r}
+seurat_list_grp <- seurat_list_grp %<>% 
+  mutate(seur_int = map(anchors,
+                    function(a) {
+                      i <- IntegrateData(
+                                  anchorset = a,
+                                  normalization.method = "SCT",
+                                  verbose = FALSE
+                      )
+                      DefaultAssay(i) <- "integrated"
+                      i
+                    }
+  ))
+```
+
+```{r}
+seurat_list_grp %<>% 
+  mutate(seur_int = map(seur_int, ~AddMetaData(.x, .x[[]] %>% 
+                                    separate(treatment, into = c("genotype", "dapt"), sep = "_") %>% 
+                                    select(genotype, dapt))
+                       ))
+```
+
+```{r}
+seurat_list_grp %<>% 
+  mutate(seur_int = map2(seur_int, data, function(i, d) {
+                                    i@misc <-  d$sObj[[1]]@misc
+                                    i
+                                  }
+                       ))
+```
+
+```{r}
+seur_objs <- seurat_list_grp %$%
+  {
+    names(seur_int) <- c("WT-neg Vs WT-DAPT", "WT-DAPT Vs ASCL1ko-DAPT")
+    seur_int
+  }
+```
+
+```{r}
+rm(seur_int.misc, seurat_list_grp)
+```
+
+# Principal component analysis
+
+To overcome the extensive technical noise in any single feature for scRNA-seq data, Seurat clusters cells based on their PCA scores, with each PC essentially representing a "metafeature" that combines information across a correlated feature set. The top principal components therefore represent a robust compression of the dataset. 
+
+```{r eval=TRUE, message=FALSE, include=TRUE}
+seur_objs <- map(seur_objs, function(seur_obj) {
+  seur_obj %<>%
+    RunPCA(npcs = 50, verbose = FALSE) 
+  seur_obj
+})
+```
+
+## Identify the number of components to be used
+
+There is a range of techniques one can use to identify how many components to use for the subsequent analysis. There are three suggested approaches to consider to identify the dimensionality of a dataset in Seurat:
+
+1. exploring PCs to determine relevant sources of heterogeneity, which could be used, for example, in conjunction with GSEA
+2. statistical test based on a random null model, but is time-consuming for large datasets and may not return a clear PC cutoff (Jack Straw procedure)
+3. commonly used heuristic, that can be calculated instantly (Elbow plot)
+
+A recent benchmarking [paper](https://pubmed.ncbi.nlm.nih.gov/32873325/) highlighted the usage of the `maxLikGlobalDimEst()` function from the [intrinsicDimension package](https://cran.r-project.org/web/packages/intrinsicDimension/index.html) for the estimation of the number of components to be used.
+
+### Elbow plot
+A heuristic method generates an "Elbow plot": a ranking of principle components based on the percentage of variance explained by each one.
+```{r message=FALSE, warning=FALSE, fig.height=4, fig.width=8}
+imap(seur_objs, function(Seur_obj, Seur_obj_name) {
+  ElbowPlot(Seur_obj, ndims = 50)  +
+    ggtitle(Seur_obj_name)
+}) %>%
+  ggarrange(plotlist = .,
+            nrow = 1,
+            ncol = length(seur_objs))
+```
+
+
+### Estimating the intrinsic dimension
+
+The `maxLikGlobalDimEst()` function from the [intrinsicDimension package](https://cran.r-project.org/web/packages/intrinsicDimension/index.html) estimates the intrinsic dimension of a data set using models of translated Poisson mixture models.
+The number of PCs suggested by this approach is: 
+```{r, comment=""}
+# k specifies the number of nearest neighbors
+int_dim <- seur_objs %>% 
+  map(
+    ~intrinsicDimension::maxLikGlobalDimEst(.x@reductions$pca@cell.embeddings, k = 10))
+int_dim %>% 
+  map(~ceiling(.x$dim.est)) %>% 
+  as_tibble()
+  
+```
+
+Based on the above elbow plot we chose to use 20 PCs for the subsequent:
+```{r, comment=""}
+seur_objs <- map(seur_objs, function(seur_obj){
+  nb_PCs <- 25
+  seur_obj@misc$nb_PCs <- c(1:max(nb_PCs))
+  seur_obj
+})
+```
+
+
+
+```{r message=FALSE, warning=FALSE}
+seur_objs <- map(seur_objs, function(seur_obj) {
+  seur_obj %>%
+    RunUMAP(
+      dims = seur_obj@misc$nb_PCs,
+      verbose = TRUE,
+      umap.method = "uwot",
+      metric = "cosine"
+    )
+})
+
+```
+
+# Clustering the cells
+
+Seurat applies a graph-based clustering approach. Cells are embedded into a graph structure, e.g. a K-nearest neighbor (KNN) graph, with edges drawn between cells with similar feature expression patterns. Subsequently,this graph is partitioned into highly interconnected "communities".
+The KNN graph is first constructed based on the euclidian distance in PCA space. The edge weights between any two cells are refined based on their shared overlap in their local neighborhoods (Jaccard similarity) (`FindNeighbors()` function).
+The clustering was performed using the Louvain algorithm. The number of identified cellular communities can be tuned by changing the clustering resolution. Thereby increased clustering resolution coincides with increased number of clusters.
+
+```{r}
+seur_objs <- map(seur_objs, function(seur_obj) {
+  seur_obj <- seur_obj %>%
+    FindNeighbors(dims = seur_obj@misc$nb_PCs, verbose = FALSE)
+    seur_obj
+})
+```
+
+
+```{r}
+seur_objs <- map(seur_objs, function(seur_obj) {
+  seur_obj <- seur_obj %>%
+    FindClusters(resolution = c(0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4), algorithm = 1, verbose = FALSE)
+    seur_obj
+})
+```
+
+```{r}
+write_rds(seur_objs, str_c(output_dirs["R_objects"], "integrated_seurat_object_pre-processed.RDS", sep = "/"))
+# seur_objs <- read_rds(str_c(output_dirs["R_objects"], "integrated_seurat_object_pre-processed.RDS", sep = "/"))
+```
+
+```{r, fig.width=12, message=FALSE, warning=FALSE, results="hide", fig.keep="all"}
+imap(seur_objs, function(seur_obj, seur_name) {
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "orig.ident") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL) + ggtitle(seur_name)
+}) 
+```
+
+The integration of the different samples results in overall good admixture of the cells in terms of the underlying experimental samples. The sample group for WT wit hand without DAPT treatment shows an interesting narrow list of cells (forming bridge between 2 arms of clusters) which would be worth looking at at later stage with doublet classification and also their mitochondrial percentage values. Whereas the sample group for WT vs ASCL1ko with DAPT treatments shows more or less uniform mix of cells. 
+
+## Investigation of the separation of clusters with differing clustering resolutions
+
+To inform the choice of the clustering resolution to be used in subsequent analyses, we investigated the changes in clustering over a range of clustering resolutions (resolutions 0.2 to 1.4 in 0.2 increments).
+The "ideal" clustering resolution for subsequent analyses depends on the hypothesis to be tested. Generally, we aim to use as few clusters as possible to describe the underlying biology in sufficient detail required to answer the biological question.
+
+```{r fig.height=12, fig.width=12, message=FALSE, warning=FALSE}
+imap(seur_objs, function(seur_obj, Seur_name) {
+  clust_tree <- clustree(seur_obj, prefix = "integrated_snn_res.") +
+    ggtitle(str_c(
+      "Changes in clustering resolution for",
+      str_replace(Seur_name, "_", " "),
+      sep = " "
+    )) +
+    theme(plot.title = element_text(size = 14, face = "bold"))
+}) %>%
+  ggarrange(plotlist = ., ncol = 2, nrow = 1)
+```
+
+For the initial analysis we used the smallest clustering resolution (0.2) which results in 5-6 clusters. In addition, we investigated a resolution of 1 which results in 18-19 clusters.
+
+```{r}
+seur_objs <- map(seur_objs, function(seur_obj)
+  {
+    seur_obj@misc$clustering_resolution <- "integrated_snn_res.0.6"
+    seur_obj
+  }
+)
+```
+
+```{r}
+
+seur_objs <- map(seur_objs, function(seur_obj)
+  {
+    seur_obj@misc$clust_res_of_interest <- c(0.2, 0.6)
+    seur_obj
+  }
+)
+
+```
+
+
+
+
+```{r fig.height=15, fig.width=16, message=FALSE, warning=FALSE, results="hide", fig.keep="all"}
+imap(seur_objs, function(seur_obj, seur_name) {
+  dim_plots <-
+    map(seur_obj@misc$clust_res_of_interest, function(res_of_int) {
+      int_res <- str_c("integrated_snn_res", res_of_int, sep = ".")
+      DimPlot(seur_obj,
+              label = FALSE,
+              group.by = int_res) +
+        coord_fixed(ratio = 1) +
+        scale_x_discrete(breaks = NULL) +
+        scale_y_discrete(breaks = NULL)
+    }) %>%
+  ggarrange(
+    plotlist  = .,
+    align = "hv",
+    nrow = 1,
+    ncol = 2
+  )
+
+  grouped_plots <- ggarrange(
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "Phase") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+
+    # DimPlot(seur_obj,
+    #         label = FALSE,
+    #         group.by = "HUWE1_status") +
+    #   coord_fixed(ratio = 1) +
+    #   scale_x_discrete(breaks = NULL) +
+    #   scale_y_discrete(breaks = NULL),
+
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "genotype") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "dapt") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    align = "hv",
+    nrow = 1,
+    ncol = 3
+  )
+  
+  grouped_plots2 <- ggarrange(
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "scDblFinder.class") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+
+    FeaturePlot(seur_obj,
+            features = "percent_mito") +
+      coord_fixed(ratio = 1),
+
+    FeaturePlot(seur_obj,
+            features = "nFeature_RNA") +
+      coord_fixed(ratio = 1),
+    align = "hv",
+    nrow = 1,
+    ncol = 3
+  )
+
+
+  ggarrange(
+    dim_plots,
+    grouped_plots,
+    grouped_plots2,
+    align = "hv",
+    nrow = 3,
+    ncol = 1
+  ) %>%
+    annotate_figure(top = text_grob(
+      str_replace_all(seur_name, "_", " "),
+      face = "bold",
+      size = 16
+    ))
+}) 
+```
+
+Based on the UMAP dimensional reduction and clustering seems to be driven, at least in part, by cell cycle phase, as cells seem to separate largely according to "Phase". It is possible to regress out at least part of the cell cycle signal during the initial SCTransform normalisation. However, if the cell cycle is an (important) part of the underlying biological system it may not be advisable to remove it.
+
+The interesting group of cells from sample group WT with and without DAPT treatment does seem to be doublets with increased number of features detected (nFeature_RNA). It is also worth noting that the there are reduced ASCL1ko cells in G1 phase in comparison to the WT with DAPT treatment. 
+
+
+As this is a developmental system, we expect developmental trajectories to be present in this dataset.
+Before performing RNA velocity analysis using [scVelo](https://scvelo.readthedocs.io/), we visualise the dataset in PC space as trajectories are often apparent in the first few PCs.
+
+```{r, fig.width=12, message=FALSE, warning=FALSE, results="hide", fig.keep="all"}
+imap(seur_objs, function(seur_obj, seur_name) {
+  ggarrange(
+    PCAPlot(seur_obj,
+            label = FALSE, 
+            group.by = "integrated_snn_res.0.6") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    PCAPlot(seur_obj,
+            label = FALSE, 
+            group.by = "Phase") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    PCAPlot(seur_obj,
+            label = FALSE, 
+            group.by = "genotype") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    PCAPlot(seur_obj,
+            label = FALSE, 
+            group.by = "dapt") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    align = "hv",
+    nrow = 2,
+    ncol = 2
+  ) %>%
+    annotate_figure(top = text_grob(
+      str_replace_all(seur_name, "_", " "),
+      face = "bold",
+      size = 16
+    ))
+}) 
+```

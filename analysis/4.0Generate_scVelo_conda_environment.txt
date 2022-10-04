@@ -1,0 +1,32 @@
+# Generate scVelo conda environment
+
+module purge
+module load Anaconda3/2020.02
+
+conda create --name scvelo-0.2.4
+
+conda activate scvelo-0.2.4
+
+conda install -c bioconda scvelo -c conda-forge ipykernel
+conda install -c anaconda pip
+
+conda install -c conda-forge tqdm openpyxl python-igraph louvain pybind11 hnswlib
+conda install -c anaconda ipywidgets
+
+pip install remote_ikernel
+
+python -m ipykernel install --user --name=scvelo-0.2.4
+ 
+python3 -m remote_ikernel manage --add \
+    --kernel_cmd="ml purge && conda activate scvelo-0.2.4 && ipython3 kernel -f {connection_file}" \
+    --name="scvelo-0.2.4" \
+    --interface=local \
+    --workdir="~/" \
+    --language=python3
+    
+conda deactivate
+
+
+# consider installing the following
+conda install -c conda-forge tqdm
+conda install -c conda-forge ipywidgets

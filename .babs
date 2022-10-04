@@ -1,0 +1,13 @@
+-
+  Project: ASCL1-KO cortical neural differentiation day24 with Notch inhibition
+  Bioinformatician: ghanata
+  Scientist: oana.paun@crick.ac.uk
+  Lab: guillemotf
+  Created: 2022-03-10
+  Path: /camp/stp/babs/working/bioinformatics/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition
+  Hash: op216
+  Scititle: ASCL1-KO cortical neural differentiation day24 with Notch inhibition
+  Active: True
+  Type: scrnaseq
+  Lims: asf-SC21030
+  Topics: [seq,rnaseq,mrna,single-cell]

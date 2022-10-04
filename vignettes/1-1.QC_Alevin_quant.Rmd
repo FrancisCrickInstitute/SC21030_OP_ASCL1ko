@@ -1,0 +1,748 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Quality check and filtering of low quality cells 
+output:
+  html_notebook:
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+# Project summary (from ASF proposal):
+
+An in vitro model of human cortical neuronal differentiation used in the lab indicated neural progenitors start to differentiate into post-mitotic neurons after day 15 of neural induction. As a result, immunostaining analyses revealed a heterogenous population of cells (actively-dividing neural progenitors and post-mitotic neurons) at day 20. 
+
+Single-cell RNAseq analysis (performed by Stephanie Strohbuecker) of previously submitted wild-type neuronal cells at day 20 revealed an ASCL1-enriched population of cells, which express neural progenitor specific markers, and are found in the G1 phase of the cell cycle, while upregulating cell cycle exit genes (e.g. GADD45G, CDKN1C). Furthermore, this population was also enriched for markers of differentiating neural progenitors (e.g. SOX4, HES6, DLL1), suggesting ASCL1 is upregulated in progenitors just prior to terminal differentiation. RNA velocity analysis further supported this view. 
+
+Additional time-course experiment performed in the lab revealed the ASCL1 expression pattern during human cortical neuronal differentiation. At both the RNA and protein level, ASCL1 shows a progressive increase in expression after day 15 of neuronal differentiation, with a main peak at day 24, which coincides with 24 hours post Notch inhibition. DAPT was added at day 23 to synchronise the culture and make the vast majority of progenitors to exit the cell cycle and differentiate into neurons, corroborating the single-cell RNAseq findings at day 20. 
+
+For the current experiment, three wild-type and three ASCL1 knockout iPSC clones will undergo cortical neuronal differentiation. This time, cells will be collected at day 24, the time point when ASCL1 is highest expressed. With regards to only the wild-type cells, we would like to repeat the day 20 analyses performed by Stephanie on this later timepoint to show the existence of this ASCL1-eriched population (as we have other experiments conducted at this timepoint we wish to support). Secondly, we would like to compare wild-type cells at day 24 with and without Notch inhibitor treatment, to show that DAPT treatment results in a shift to a more homogenous population of ASCL1-positive cells that have the same identity as the ones identified in the absence of Notch inhibition. 
+
+Secondarily,  we would like to determine differentially expressed genes in cortical neuronal cultures at day 24 generated from wild-type versus ASCL1 knockout iPSCs to determine if the neurons formed from ASCL1 knockout cells are different from wild-type cells, since the controls (day 24 cells with DAPT) can be shared for both purposes. 
+
+
+
+```{r}
+RMD_file_name <- "1-1.QC_Alevin_quant"
+```
+
+
+
+# Prepare data
+```{r message=FALSE, include=FALSE}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+library(gghighlight)
+
+library(SingleCellExperiment)
+library(Seurat)
+
+library(scater)
+library(clustree)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+
+```{r, eval=TRUE}
+alevin_sce <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+      "0-7.Label_doublets",
+      "alevin_sce_scDblFinder.RDS"
+    )
+  )
+
+```
+
+```{r}
+# Path to output and figures directories
+
+output_dirs <-
+  str_c(here(),
+        "data/derived_data",
+        c("Tables", "R_objects", "Figures"),
+        RMD_file_name,
+        sep = "/") %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+      generate_directories(.x))
+```
+
+To ensure that the subsequent analysis provides access to the gene symbols we converted the rownames in each of the `SingleCellExperiment` objects from Ensembl gene IDs to gene symbols. Note that for genes for which several Ensembl IDs map to the same gene symbol we kept the Ensembl gene ID for the subsequent analysis.
+```{r}
+alevin_sce <- map(alevin_sce, function(sce_obj) {
+  duplicated_ids <-
+    rowData(sce_obj)[duplicated(rowData(sce_obj)$gene_name) |
+                       duplicated(rowData(sce_obj)$gene_name, fromLast = TRUE), ]$gene_id
+  adj_row_data <- rowData(sce_obj) %>%
+    as_tibble() %>%
+    mutate(symbol = case_when(gene_id %in% duplicated_ids ~ gene_id,
+                              TRUE ~ gene_name))
+  rownames(sce_obj) <- adj_row_data$symbol
+  sce_obj
+})
+```
+
+Before comparing the two quantification approaches, we transform the `SingleCellExperiment` object from the Alevin quantification into Seurat objects.
+```{r, eval=TRUE, include=FALSE}
+sample_meta <- 
+  read_csv(here("data", "raw_data", "project_docs", "SC21030_ExperimentalTable.csv")) %>% 
+  mutate(sample_id = `LIMS ID`) %>% 
+  mutate(class.group = str_c(Genotype, Treatment, sep = "_")) 
+# Seurat does not accept a SCE object without a `logcounts` in the assay slot
+
+# We therefore calculate `logcounts` using the `scuttle::normalize()` function.
+
+seurat_all <-
+  imap(alevin_sce, function(sce_obj, sce_name) {
+    sce_obj <- scuttle::logNormCounts(sce_obj)
+    
+    # using the function from the SeuratObject package to transform the SingleCellExperiment into a Seurat object
+    # seur_obj <- as.Seurat(sce_obj)
+    seur_obj <- CreateSeuratObject(counts=counts(sce_obj), assay='RNA',
+                       meta.data=colData(sce_obj) %>% as.data.frame(), 
+                       project=sce_name,
+                       min.cells=0, min.features=0)
+    
+    # The above transformation only uses the logcounts assay, however we want to transfer the spliced and unspliced read count assays as well for future use with scVelo
+    seur_obj[["spliced"]] <-
+      Seurat::CreateAssayObject(counts = assay(sce_obj, "spliced"))
+    seur_obj[["unspliced"]] <-
+      Seurat::CreateAssayObject(counts = assay(sce_obj, "unspliced"))
+    
+    # Add the rowData information to each of the assays
+    seur_obj[["RNA"]] <-
+      Seurat::AddMetaData(seur_obj[["RNA"]],
+                          as.data.frame(
+                            SingleCellExperiment::rowData(sce_obj),
+                            row.names = rownames(seur_obj[["RNA"]])
+                          ))
+    seur_obj[["spliced"]] <-
+      AddMetaData(seur_obj[["spliced"]],
+                  as.data.frame(
+                    SingleCellExperiment::rowData(sce_obj),
+                    row.names = rownames(seur_obj[["spliced"]])
+                  ))
+    seur_obj[["unspliced"]] <-
+      AddMetaData(seur_obj[["unspliced"]],
+                  as.data.frame(
+                    SingleCellExperiment::rowData(sce_obj),
+                    row.names = rownames(seur_obj[["unspliced"]])
+                  ))
+    
+    seur_obj@misc$MT_genes <- rowData(sce_obj) %>%
+      as_tibble() %>%
+      filter(str_detect(gene_name, "^MT-")) %>%
+      pull(gene_name)
+    
+    seur_obj$orig.ident <- sce_name
+    seur_obj$treatment <- 
+      sample_meta$class.group[sample_meta$sample_id == sce_name]
+    
+    colnames(seur_obj@meta.data) <-
+      str_replace(colnames(seur_obj@meta.data), "_spliced", "_RNA")
+    
+    seur_obj@misc$symbols_without_unique_Ensembl <-
+      rowData(sce_obj)[duplicated(rowData(sce_obj)$gene_name) |
+                         duplicated(rowData(sce_obj)$gene_name, fromLast = TRUE),] %>%
+      as_tibble() %>%
+      select(-starts_with("scDbl")) %>%
+      group_by(gene_name) %>%
+      mutate(sum_of_IDs = NROW(gene_biotype)) %>%
+      arrange(desc(sum_of_IDs)) %>%
+      select(-gene_id) %>%
+      distinct()
+    
+    seur_obj@misc$prot_coding_without_unique_Ensembl <-
+    rowData(sce_obj)[duplicated(rowData(sce_obj)$gene_name) |
+                       duplicated(rowData(sce_obj)$gene_name, fromLast = TRUE), ] %>% 
+    as_tibble() %>% 
+    select(-starts_with("scDbl")) %>%
+    filter(gene_biotype == "protein_coding")
+    
+    seur_obj
+  })
+
+```
+
+```{r identify-thresholds}
+seurat_all <-
+  imap(alevin_sce, function(sce, sce_name) {
+    per_cell_stats <-
+      perCellQCMetrics(sce, subsets = list(Mito = seurat_all[[sce_name]]@misc$MT_genes))
+    
+    filter_thresholds <-
+      bind_rows(
+        attr(
+          isOutlier(
+            per_cell_stats$sum,
+            type = "lower",
+            log = TRUE,
+            nmads = 5
+          ),
+          "threshold"
+        ) %>%
+          enframe() %>%
+          pivot_wider() %>%
+          mutate(threshold = "nCount_RNA",
+                 nmads = 5),
+        attr(
+          isOutlier(
+            per_cell_stats$subsets_Mito_percent,
+            type = "higher",
+            nmads = 3
+          ),
+          "threshold"
+        ) %>%
+          enframe() %>%
+          pivot_wider() %>%
+          mutate(threshold = "percent_mito",
+                 nmads = 3),
+        attr(
+          isOutlier(
+            per_cell_stats$detected,
+            type = "lower",
+            nmads = 3,
+            log = TRUE
+          ),
+          "threshold"
+        ) %>%
+          enframe() %>%
+          pivot_wider() %>%
+          mutate(threshold = "nFeature_RNA",
+                 nmads = 3)
+      )
+    
+    # Specify thresholds
+    seurat_all[[sce_name]]@misc$filter_thresholds <-
+      filter_thresholds
+    seurat_all[[sce_name]]@misc$filter_mito_percent <-
+      seurat_all[[sce_name]]@misc$filter_thresholds %>%
+      filter(threshold == "percent_mito") %>%
+      pull(higher) %>%
+      round()
+    seurat_all[[sce_name]]@misc$filter_feat_detect <-
+      seurat_all[[sce_name]]@misc$filter_thresholds %>%
+      filter(threshold == "nFeature_RNA") %>%
+      pull(lower) %>%
+      round()
+    seurat_all[[sce_name]]
+  })
+```
+
+
+# Analysis approach
+
+Quantification was performed using [alevin](https://salmon.readthedocs.io/en/latest/alevin.html) as this quantification approach was recently described as being one of the quantification methods appropriate for further downstream analyses [Soneson et al. 2021](https://doi.org/10.1371/journal.pcbi.1008585).
+We performed mapping against the human transcriptome (ensembl GRCh37, release 75).
+
+Considering that the Cellranger is the recommended tool for analysis of data gathered using 10x platform, we decided to use the whitelisted cell barcodes from Cellranger quantification as input for Alevin quantification.
+
+This resulted in the following number of detected cells.
+
+We subsequently used Seurat v4 for further analysis.
+
+# Quality control
+
+Before performing the analysis and integration of samples, it is important to remove low quality cells.
+Low quality cells are often marked by high proportion of mitochondrial reads and/or a low number of detected features. However, these factors are cell type specific and some metabolically active cells may have a very high proportion of mitochondrial reads.
+
+[Commonly used QC metrics](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4758103/):
+
+* the number of unique genes detected in each cell
+    + low-quality cells or empty droplets will often have very few genes
+    + cell doublets or multiplets may exhibit an aberrant high gene count
+* the total number of molecules detected within a cell (correlates strongly with unique genes)
+* the percentage of reads mapping to the mitochondrial genome
+    + low-quality/dying cells often exhibit extensive mitochondrial contamination
+    + calculate mitochondrial QC metrics with the `PercentageFeatureSet` function, which calculates the percentage of counts originating from a set of features
+    + use the set of all genes starting with `mt-` as a set of mitochondrial genes
+
+Before filtering the cells we investigated key QC parameters.
+
+```{r}
+alevin_sce <- map(alevin_sce, function(sce_obj){
+  mito_genes <- rowData(sce_obj) %>%
+      as_tibble() %>%
+      filter(str_detect(gene_name, "^MT-")) %>%
+      pull(gene_name)
+ addPerCellQC(sce_obj, subset = list(Mito = mito_genes))
+})
+
+```
+
+The number of detected genes should be increasing with increased total count.
+```{r plot-genes-counts, fig.height=12, fig.width=8, message=FALSE, warning=FALSE}
+imap(alevin_sce, ~ {
+  plotColData(.x,
+              x = "sum",
+              y = "detected") +
+    labs(title = .y, x = "Total count", y = "Detected genes") 
+    
+}) %>%
+  ggarrange(
+    plotlist = .,
+    nrow = ceiling(length(alevin_sce)/2),
+    ncol = 2,
+    common.legend = TRUE,
+    legend = "bottom"
+  )
+```
+
+```{r}
+seurat_all <- map(seurat_all, function(seur_obj){
+  seur_obj[["percent_mito"]] <- PercentageFeatureSet(seur_obj, features = seur_obj@misc$MT_genes)
+  seur_obj
+})
+```
+
+
+```{r mito-plot, fig.height=4, fig.width=8, warning=TRUE}
+mito_plot <-
+  imap(seurat_all, function(seur_obj, appr_name) {
+    seur_obj[[]]
+  }) %>%
+  purrr::reduce(bind_rows) %>%
+  ggplot(aes(x = percent_mito, colour = orig.ident)) +
+  geom_vline(xintercept = c(1, 8), color = "grey65") +
+  geom_density() +
+  labs(subtitle = "Density plot for percentage of expressed mitochondrial genes")# +
+  # coord_cartesian(xlim = c(0, 30))
+```
+ 
+```{r feature-plot, fig.height=4, fig.width=8, warning=TRUE}
+feature_plot <-
+        imap(seurat_all, function(seur_obj, appr_name) {
+      seur_obj[[]]
+    }) %>%
+    purrr::reduce(bind_rows) %>%
+    # filter(orig.ident %in% c("TAN2457A23","TAN2457A24", "TAN2457A25")) %>%
+        ggplot(aes(x = nFeature_RNA, colour = orig.ident)) +
+        geom_density() +
+        geom_vline(xintercept =c(1200, 6000), color = "grey65") +
+        labs( subtitle = "Density plot for the number of expressed features") 
+```
+
+Across the samples the percentage of expressed mitochondrial features ranges from ~1% to ~8% in the majority of cells.  The overall profiles for the number of expressed features varies more between the samples. Within samples from the first batch fewer number of features were detected per cell in TAN2457A23 and TAN2457A24.
+
+```{r fig.height=8, fig.width=8}
+ggarrange(mito_plot, feature_plot, nrow = 2, ncol =1)
+```
+
+
+Rather than using each of the parameters above in isolation, we can use a combination of the number of detected features and the percentage of mitochondrial gene expression to exclude low quality cells.
+The underlying assumption being that cells with a high percentage of mitochondrial gene expression and a concomitant high number of detected genes are high quality cells with high metabolic requirements.
+```{r fig.height=14, fig.width=10,}
+imap(seurat_all, function(seur_obj, seur_name) {
+  seur_obj[[]] %>%
+    as_tibble() %>%
+    ggplot(aes(x = nFeature_RNA, y = percent_mito)) +
+    geom_vline(xintercept = c(seur_obj@misc$filter_feat_detect),
+               color = "grey65") +
+    geom_hline(yintercept = c(seur_obj@misc$filter_mito_percent),
+               color = "grey65") +
+    geom_point() +
+    labs(title = seur_name) +
+    coord_cartesian(xlim = c(0, 10000), ylim = c(0, 60))
+}) %>%
+  ggarrange(
+    plotlist = .,
+    nrow = ceiling(length(alevin_sce) / 2),
+    ncol = 2,
+    common.legend = TRUE
+  )
+```
+
+We will use a 2-step filtering approach:
+First we remove cells with a low number of detected features or cells with a very high proportion of mitochondrial gene expression. Subsequently, we will investigate if cluster of cells remain that show concurrent high mitochondrial gene expression and low number of detected features.
+
+We identified the thresholds to be used for filtering low quality cells by using thresholds defined at a certain number of median absolute deviations (MADs) away from the median of both the percentage of mitochondrial gene expression (3 MADs) and also the number of detected features (3 MADs). This results in sample-specific thresholds:
+```{r}
+imap_dfr(seurat_all, function(seur_obj, seur_name) {
+  tibble(
+    "sample_id" = seur_name,
+    "threshold_nb_features" = seur_obj@misc$filter_feat_detect,
+    "threshold_mito_percentage" = seur_obj@misc$filter_mito_percent
+  )
+}) %>% 
+  DT::datatable(caption = "Thresholds used for removing low-quality cells from each sample.")
+```
+
+
+```{r}
+seurat_all <- imap(seurat_all, function(seur_obj, seur_name) {
+  subset(
+    seur_obj,
+    subset = nFeature_RNA > seur_obj@misc$filter_feat_detect &
+      percent_mito < seur_obj@misc$filter_mito_percent
+  )
+})
+```
+
+```{r fig.height=12, fig.width=10,}
+imap(seurat_all, function(seur_obj, seur_name) {
+  seur_obj[[]] %>%
+     as_tibble() %>%
+    ggplot(aes(x = nFeature_RNA, y = percent_mito)) +
+    geom_vline(xintercept = c(seur_obj@misc$filter_feat_detect ), color = "grey65") +
+    geom_hline(yintercept = c(seur_obj@misc$filter_mito_percent ), color = "grey65") +
+    geom_point() +
+    labs(title = seur_name) +
+    coord_cartesian(xlim = c(0, 10000), ylim = c(0, 60))
+}) %>%
+  ggarrange(
+    plotlist = .,
+    nrow = ceiling(length(alevin_sce)/2),
+    ncol = 2,
+    common.legend = TRUE,
+    legend = "right"
+  )
+
+```
+
+```{r}
+seurat_nbCells <- imap_dfr(seurat_all, function(seur_obj, seur_name){
+  seur_obj[[]] %>% 
+    select(orig.ident, treatment) %>% 
+    group_by(orig.ident, treatment) %>% 
+    summarise(Filtered_nb_cells = n(), .groups = "drop")
+})
+alevin_whitelist_nbCells <- imap_dfr(alevin_sce, function(obj, obj.name){
+  data.frame(orig.ident = obj.name, alevin_whitelist_nb_cells = ncol(obj))
+})
+
+merge(seurat_nbCells, alevin_whitelist_nbCells) %>% 
+  mutate(retained_cells_fraction = round(Filtered_nb_cells/alevin_whitelist_nb_cells, digits = 2)) %>% 
+  DT::datatable(caption = "Overall number of detected cells in each sample")
+
+rm(list = c("seurat_nbCells", "alevin_whitelist_nbCells"))
+```
+
+
+```{r}
+write_rds(
+  seurat_all,
+  str_c(output_dirs["R_objects"], "seurat_object_list_filtered.RDS", sep = "/"),
+  compress = "gz"
+)
+# seurat_all <- read_rds(
+#   
+#   str_c(output_dirs["R_objects"], "seurat_object_list_filtered.RDS", sep = "/")
+# )
+```
+
+```{r eval=TRUE, message=FALSE, include=TRUE}
+seurat_all <- map(seurat_all, function(seur_obj) {
+  seur_obj <- seur_obj %>%
+    NormalizeData(verbose = FALSE)
+  seur_obj <- FindVariableFeatures(seur_obj, verbose = FALSE)
+  seur_obj <- ScaleData(seur_obj, verbose = FALSE)
+  seur_obj <- seur_obj %>%
+    RunPCA(npcs = 30, verbose = FALSE) %>%
+    FindNeighbors(dims = 1:30, verbose = FALSE) %>%
+    RunUMAP(
+      dims = 1:30,
+      verbose = FALSE,
+      umap.method = "uwot",
+      metric = "cosine"
+    ) %>%
+    FindClusters(resolution = c(0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4),
+                 verbose = FALSE)
+  seur_obj
+})
+```
+
+```{r}
+write_rds(
+  seurat_all,
+  str_c(output_dirs["R_objects"], "seurat_object_list_filtered_processed.RDS", sep = "/"),
+  compress = "gz"
+)
+
+# seurat_all <- read_rds(
+#   str_c(output_dirs["R_objects"], "seurat_object_list_filtered_processed.RDS", sep = "/")
+# )
+```
+
+## Investigation of the separation of clusters with differing  clustering resolutions
+
+We will be using the average mitochondrial expression and the average number of features per cluster to perform the filtering of low-quality cell clusters. We therefore investigate how these two parameters develop across different clustering resolutions.
+```{r fig.height=10, fig.width=20, message=FALSE, warning=FALSE, results="asis", fig.show=TRUE}
+imap(seurat_all, function(seur_obj, Seur_name){
+   clust_mito <- clustree(seur_obj, prefix = "RNA_snn_res.", node_colour = "percent_mito", node_colour_aggr = "mean") +
+    ggtitle("Average percentage of\nmitochondrial gene expression") + 
+    theme(plot.title = element_text(size = 14, face = "bold"))
+  clust_feat <- clustree(seur_obj, prefix = "RNA_snn_res.", node_colour = "nFeature_RNA", node_colour_aggr = "mean") +
+    ggtitle("Average number of features") + 
+    theme(plot.title = element_text(size = 14, face = "bold"))
+  umap_p <- DimPlot(seur_obj,
+            label = FALSE, 
+            group.by = "RNA_snn_res.0.2") +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL)
+    
+  ggarrange(clust_mito, clust_feat, umap_p, nrow = 1) %>% 
+    annotate_figure(top = text_grob(Seur_name, size = "18", face = "bold"))
+})
+
+```
+
+
+The dimensionality reduction led to the following UMAP:
+```{r visualise-QC-UMAP, fig.height=40, fig.width=18, message=FALSE, warning=FALSE}
+imap(seurat_all, function(seurat_obj, seur_name) {
+  ggarrange(
+  
+    FeaturePlot(seurat_obj,
+                features = "nFeature_RNA") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    
+    FeaturePlot(seurat_obj,
+                features = "percent_mito") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    
+    align = "hv",
+    nrow = 1,
+    ncol = 2
+  ) %>%
+    annotate_figure(top = text_grob(seur_name,
+                                    face = "bold",
+                                    size = 16))
+}) %>%
+  ggarrange(
+    plotlist = .,
+    nrow = length(seurat_all),
+    ncol = 1,
+    align = "hv"
+  )
+```
+
+In addition to surveying the percentage of mitochondrial expression and the number of detected features we can investigate suspected doublet cells.
+We labeled suspected doublets using the [scDblFinder](https://bioconductor.org/packages/release/bioc/html/scDblFinder.html) package.
+
+```{r visualise-doublets, fig.height=40, fig.width=18, message=FALSE, warning=FALSE}
+imap(seurat_all, function(seurat_obj, seur_name) {
+  ggarrange(
+    FeaturePlot(seurat_obj,
+                features = "scDblFinder.score") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    
+    
+    DimPlot(seurat_obj,
+            label = FALSE,
+            group.by = "scDblFinder.class") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL) ,
+    
+    align = "hv",
+    nrow = 1,
+    ncol = 2
+  ) %>%
+    annotate_figure(top = text_grob(seur_name,
+                                    face = "bold",
+                                    size = 16))
+}) %>%
+  ggarrange(
+    plotlist = .,
+    nrow = length(seurat_all),
+    ncol = 1,
+    align = "hv"
+  )
+```
+
+
+## Subssetting further based on features level in clusters
+
+
+We will identify the average number of features and mitochondria percent to determine clusters to retain
+
+```{r eval = FALSE, echo=TRUE, include=TRUE, fig.height=20, fig.width=15}
+options(bitmapType = "cairo")
+imap(seurat_all, function(seurat_obj, seur_name) {
+  FetchData(seurat_obj,
+            vars =  c("nFeature_RNA", "percent_mito", "RNA_snn_res.1.4")) %>%
+    group_by(RNA_snn_res.1.4) %>%
+    summarize(across(everything(), mean)) %>%
+    ggplot(aes(nFeature_RNA, percent_mito, label = RNA_snn_res.1.4)) +
+    geom_label() +
+    theme_light() +
+    ggtitle(seur_name)
+}) %>% 
+  patchwork::wrap_plots(ncol = 2)
+
+```
+
+We will remove clusters with roughly percent_mito> 5% and nFeature_RNA < 1000
+
+```{r}
+remClust <- list(
+  c('6', '14', '19','20', '21'),
+  c('7', '20', '22'),
+  c('1', '11', '13', '16', '20'),
+  c('16', '19'),
+  c('13', '15', '18'),
+  c('12', '15', '19'),
+  c('7', '12', '15', '18', '20', '21'),
+  c('0', '1', '2', '3', '4', '6', '7', '12', '13', '15', '20', '21', '25'),
+  c('6', '13', '18', '19')
+)
+seurat_all <- map2(seurat_all, remClust, function(seur_obj, remC) {
+  message(unique(seur_obj$orig.ident))
+  if (length(remC) > 0)
+    subset(seur_obj,
+           idents = remC,
+           invert = TRUE)
+  else
+    seur_obj
+})
+```
+
+
+```{r eval=TRUE, message=FALSE, include=TRUE}
+
+seurat_all <- map(seurat_all, function(seur_obj) {
+  seur_obj <- seur_obj %>%
+    NormalizeData(verbose = FALSE)
+  seur_obj <- FindVariableFeatures(seur_obj, verbose = FALSE)
+  seur_obj <- ScaleData(seur_obj, verbose = FALSE)
+  seur_obj <- seur_obj %>%
+    RunPCA(npcs = 30, verbose = FALSE) %>%
+    FindNeighbors(dims = 1:30, verbose = FALSE) %>%
+    RunUMAP(
+      dims = 1:30,
+      verbose = FALSE,
+      umap.method = "uwot",
+      metric = "cosine"
+    ) %>%
+    FindClusters(resolution = c(0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4),
+                 verbose = FALSE)
+  seur_obj
+})
+
+```
+
+```{r eval = FALSE, echo=TRUE, include=TRUE}
+seurat_nbCells <- imap_dfr(seurat_all, function(seur_obj, seur_name){
+  seur_obj[[]] %>% 
+    select(orig.ident, treatment) %>% 
+    group_by(orig.ident, treatment) %>% 
+    summarise(Filtered_nb_cells = n(), .groups = "drop")
+})
+alevin_whitelist_nbCells <- imap_dfr(alevin_sce, function(obj, obj.name){
+  data.frame(orig.ident = obj.name, alevin_whitelist_nb_cells = ncol(obj))
+})
+
+merge(seurat_nbCells, alevin_whitelist_nbCells) %>% 
+  mutate(retained_cells_fraction = round(Filtered_nb_cells/alevin_whitelist_nb_cells, digits = 2)) %>% 
+  DT::datatable(caption = "Overall number of detected cells in each sample after rigorous filtering")
+
+rm(list = c("seurat_nbCells", "alevin_whitelist_nbCells"))
+```
+
+```{r}
+write_rds(
+  seurat_all,
+  str_c(output_dirs["R_objects"], "seurat_object_list_filtered_processed2.RDS", sep = "/"),
+  compress = "gz"
+)
+# seurat_all <- read_rds(
+# 
+#   str_c(output_dirs["R_objects"], "seurat_object_list_filtered.RDS", sep = "/")
+# )
+```
+
+
+In reduced data, the dimensionality reduction led to the following UMAP:
+```{r visualise-QC-UMAP2, fig.height=40, fig.width=18, message=FALSE, warning=FALSE}
+imap(seurat_all, function(seurat_obj, seur_name) {
+  ggarrange(
+  
+    FeaturePlot(seurat_obj,
+                features = "nFeature_RNA") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    
+    FeaturePlot(seurat_obj,
+                features = "percent_mito") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    
+    align = "hv",
+    nrow = 1,
+    ncol = 2
+  ) %>%
+    annotate_figure(top = text_grob(seur_name,
+                                    face = "bold",
+                                    size = 16))
+}) %>%
+  ggarrange(
+    plotlist = .,
+    nrow = length(seurat_all),
+    ncol = 1,
+    align = "hv"
+  )
+```
+
+# Investigation of ASCL1 status
+
+One of the goal of the study was to identify ASCL1 enriched cells cluster, with or without Notch inhibitor. So the expression distribution for ASCL1 was plotted with minimum cluster resolution, for illustrative purpose.
+
+```{r fig.width=20, fig.height=15, eval=TRUE}
+imap(seurat_all, function(seurat_obj, seur_name) {
+  pl <- VlnPlot(
+    seurat_obj,
+    features = c("ASCL1"),
+    group.by = "RNA_snn_res.0.2",
+    combine = FALSE
+  )
+  
+  # pl <- map(pl,  function(fig) {
+  #   fig <- fig +
+  #     scale_fill_manual(values = HUWE1_status_cols)
+  #   fig$labels$title <-
+  #     str_replace_all(fig$labels$title,
+  #                     c(ENSG00000086758 = "HUWE1", ENSG00000125503 = "PPP1R12C"))
+  #   fig
+  # }) %>%
+  pl <- pl %>% 
+    ggarrange(plotlist = .,
+              common.legend = TRUE,
+              legend = "right") %>%
+    annotate_figure(top = text_grob(seur_name, face = "bold", size = 16))
+  
+  pl
+}) %>%
+  ggarrange(
+    plotlist = .,
+    nrow = ceiling(length(seurat_all) / 2),
+    ncol = 2,
+    align = "hv",
+    common.legend = TRUE
+  )
+```
+

@@ -1,0 +1,166 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: RNA velocity of wildtype cells - Prepare data for scVelo
+
+output:
+  html_notebook: 
+    df_print: paged
+---
+
+# Project summary (from ASF proposal):
+
+An in vitro model of human cortical neuronal differentiation used in the lab indicated neural progenitors start to differentiate into post-mitotic neurons after day 15 of neural induction. As a result, immunostaining analyses revealed a heterogenous population of cells (actively-dividing neural progenitors and post-mitotic neurons) at day 20. 
+
+Single-cell RNAseq analysis (performed by Stephanie Strohbuecker) of previously submitted wild-type neuronal cells at day 20 revealed an ASCL1-enriched population of cells, which express neural progenitor specific markers, and are found in the G1 phase of the cell cycle, while upregulating cell cycle exit genes (e.g. GADD45G, CDKN1C). Furthermore, this population was also enriched for markers of differentiating neural progenitors (e.g. SOX4, HES6, DLL1), suggesting ASCL1 is upregulated in progenitors just prior to terminal differentiation. RNA velocity analysis further supported this view. 
+
+Additional time-course experiment performed in the lab revealed the ASCL1 expression pattern during human cortical neuronal differentiation. At both the RNA and protein level, ASCL1 shows a progressive increase in expression after day 15 of neuronal differentiation, with a main peak at day 24, which coincides with 24 hours post Notch inhibition. DAPT was added at day 23 to synchronise the culture and make the vast majority of progenitors to exit the cell cycle and differentiate into neurons, corroborating the single-cell RNAseq findings at day 20. 
+
+For the current experiment, three wild-type and three ASCL1 knockout iPSC clones will undergo cortical neuronal differentiation. This time, cells will be collected at day 24, the time point when ASCL1 is highest expressed. With regards to only the wild-type cells, we would like to repeat the day 20 analyses performed by Stephanie on this later timepoint to show the existence of this ASCL1-eriched population (as we have other experiments conducted at this timepoint we wish to support). Secondly, we would like to compare wild-type cells at day 24 with and without Notch inhibitor treatment, to show that DAPT treatment results in a shift to a more homogenous population of ASCL1-positive cells that have the same identity as the ones identified in the absence of Notch inhibition. 
+
+Secondarily,  we would like to determine differentially expressed genes in cortical neuronal cultures at day 24 generated from wild-type versus ASCL1 knockout iPSCs to determine if the neurons formed from ASCL1 knockout cells are different from wild-type cells, since the controls (day 24 cells with DAPT) can be shared for both purposes. 
+
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+
+RNA velocity analysis will be performed using [scVelo](https://scvelo.readthedocs.io/), a python package. This packages uses `AnnData` objects specified in [scanpy](https://scanpy.readthedocs.io/en/stable/). 
+Here we convert from `Seurat` objects to AnnData files as demonstrated in this [vignette](https://mojaveazure.github.io/seurat-disk/articles/convert-anndata.html) from the `SeuratDisk` package.
+
+
+```{r}
+RMD_file_name <- "4-1.scVelo_prepare_data_remDblt"
+```
+
+```{r}
+options(future.globals.maxSize = 12000 * 1024^2, future.rng.onMisuse="ignore")
+```
+
+# Libraries
+```{r message=FALSE}
+library(tidyverse)
+library(here)
+
+library(Seurat)
+library(SeuratDisk)
+```
+
+```{r message=FALSE, warning=FALSE}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+
+```{r, eval=TRUE}
+seur_obj <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+      "3-1.cell_state_assignment_of_WT_DAPT_remDblt",
+      "integrated_seurat_object_cell_state_assign_RNA.RDS"
+    )
+  )
+seur_objs <- list()
+seur_objs$WT_DAPT <- seur_obj
+rm(seur_obj)
+```
+
+
+```{r}
+# Path to output and figures directories
+output_dirs <-
+  str_c(here(),
+        "data/derived_data",
+        c("Tables", "R_objects", "Figures"),
+        RMD_file_name,
+        sep = "/") %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+      generate_directories(.x))
+```
+
+
+The following dataset(s) are available:
+```{r}
+seur_objs
+```
+
+Converting a `Seurat` object to an AnnData file is a two-step process:
+
+1. save the Seurat object as an h5Seurat file
+2. convert the h5Seurat file to an AnnData file for use in Scanpy
+
+Note that in python column names with "." in their name can lead to problems. We therefore change all "." to "_" in the column names of the metadata
+
+Ensure that the column names in the metadata do not contain "." as that interferes with python coding.
+```{r}
+seur_objs <- map(seur_objs, function(seur_obj){
+  colnames(seur_obj@meta.data) <- str_replace_all(colnames(seur_obj@meta.data), "\\.", "_")
+  seur_obj@meta.data$cell_classification_res_1 <- as.character(seur_obj@meta.data$cell_classification_res_1)
+  seur_obj
+})
+```
+
+
+Ensure that only the genes in the SCT assay are carried forward to the RNA, spliced and unspliced data
+```{r}
+seur_objs <- map(seur_objs, function(x) {
+  genes_of_int <-
+      rownames(GetAssayData(x, assay = "SCT", slot = "data"))
+  x <- subset(x, features = genes_of_int)
+})
+```
+
+```{r}
+imap(seur_objs, function(seur_obj, seur_name){
+    print(paste("Seurat object:", seur_name))
+    map(Assays(seur_obj), function(assay_name) {
+    print(assay_name)
+    dim(GetAssayData(seur_obj, assay = assay_name, slot = "data"))
+  })  
+})
+
+```
+
+```{r}
+seur_objs <- map(seur_objs, function(seur_obj){
+  DefaultAssay(seur_obj) <- "RNA"
+  seur_obj
+})
+```
+
+
+# Saving data to an h5Seurat file
+
+Please refer to this [vignette](https://mojaveazure.github.io/seurat-disk/articles/h5Seurat-load.html) for more detail.
+
+All assays, dimensional reductions, spatial images, and nearest-neighbor graphs are automatically saved as well as extra meadata such as miscellaneaous data, command logs, or cell identity classes froma Seurat object.
+
+```{r}
+imap(seur_objs, function(seur_obj, seur_name){
+  SaveH5Seurat(seur_obj,
+             file = str_c(output_dirs[["R_objects"]], paste0(seur_name, ".h5Seurat"), sep = "/"),
+             overwrite = TRUE)
+})
+
+```
+
+# Convert to AnnData
+
+```{r}
+imap(seur_objs, function(seur_obj, seur_name){
+  Convert(
+    str_c(output_dirs[["R_objects"]], paste0(seur_name, ".h5Seurat"), sep = "/"),
+    dest = "h5ad",
+    overwrite = TRUE
+  )
+})
+```
+

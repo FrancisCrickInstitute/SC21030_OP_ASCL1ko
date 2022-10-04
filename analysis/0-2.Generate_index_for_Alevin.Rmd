@@ -1,0 +1,276 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Generate genome index for quantification with Alevin (Salmon)
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+#NOTE this script will be called from 0-2a.run_alevin_indexing_via_CAMP.Rmd to be submitted to CAMP HPC!!!
+```
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+
+```{r}
+RMD_file_name <- "0-2.Generate_index_for_Alevin"
+```
+
+In the following we follow the tutorial for [Alevin Velocity](https://combine-lab.github.io/alevin-tutorial/2020/alevin-velocity/):
+
+This script contains 
+
+* Step 1: Generation of reference fasta files
+* Step 2: Index the reference features
+
+Note that previously indexed files for Alevin can be found at `/camp/stp/babs/working/strohbs/genomes/`.
+
+
+# Libraries
+```{r}
+library(tidyverse)
+library(here)
+
+library(Biostrings)
+library(BSgenome)
+library(eisaR)
+library(plyranges)
+```
+
+# Step 1: Generation of reference fasta files
+
+The reference genome and gtf file can be found in the following location:
+```{bash, eval=TRUE}
+mkdir -p ../data/raw_data/genome_info/human/
+
+ln -s /camp/svc/reference/Genomics/babs/homo_sapiens/ensembl/GRCh37/release-75/genome/Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.fa ../data/raw_data/genome_info/human/Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.fa
+
+# Get chromosome list
+grep ">" ../data/raw_data/genome_info/human/Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.fa | cut -d ">" -f 2 | cut -d " " -f 1 > ../data/raw_data/genome_info/human/Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.chrnames.txt
+
+ln -s /camp/svc/reference/Genomics/babs/homo_sapiens/ensembl/GRCh37/release-75/gtf/Homo_sapiens.GRCh37.75.gtf ../data/raw_data/genome_info/human/Homo_sapiens.GRCh37.75.gtf
+```
+
+Extract a GRanges object containing the genomic coordinates for each annotated transcript and intron.
+Using the "separate" approach:
+
+* define introns separately for each transcript and add a flank length of 90nt to each intron
+    + flank length should be chosen depending on the RNA read length and the desired amount of overlap with an intron that is required to consider a read potentially intronic (~ read length - 10)
+        + note the 10x reads are 98nt long (the example dataset used in the tutorial contains 100nt long reads)
+    
+The "separate" approach considers exonic and intronic regions on equal footing ([Soneson et al. 2020](https://www.biorxiv.org/content/10.1101/2020.03.13.990069v1) recommend this approach for counting for RNA velocity estimations as this provided embeddings most in line with expectations in three real data sets though testing against a "ground truth" is currently not available).
+
+```{r Read gtf, eval=TRUE}
+gtf <-
+  here("data", "raw_data", "genome_info", "human", "Homo_sapiens.GRCh37.75.gtf")
+
+gtf <- read_gff(gtf)
+```
+
+
+```{r filterGtf, eval=TRUE}
+genome_chr <- read_table(here("data", "raw_data", "genome_info", "human", "Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.chrnames.txt"), col_names = F)
+gtf <- gtf %>%
+  filter((
+    seqnames(gtf) %in% genome_chr$X1
+  ))
+
+seqlevels(gtf) <- as.character(unique(seqnames(gtf)))
+```
+
+
+```{r, eval=TRUE}
+write_gff(gtf,file = here("data", "raw_data", "genome_info", "human", "Homo_sapiens.GRCh37.75_filtered.gtf"))
+# write_gff(gtf,file = here("data", "raw_data", "genome_info", "human", "Homo_sapiens.GRCh38.95_HUWE1KO_CreERT_NeoR.gtf"))
+```
+
+
+```{r}
+gtf <- here("data", "raw_data", "genome_info", "human", "Homo_sapiens.GRCh37.75_filtered.gtf")
+```
+
+In order to quantify both exonic and intronic abundances with alevin, need to provide a fasta file with both types of sequences.
+We use eisaR to extract the sequences from the fasta file.
+```{r}
+genomic_coord <- eisaR::getFeatureRanges(
+  gtf = gtf,
+  featureType = c("spliced", "intron"), 
+  intronType = "separate", 
+  flankLength = 90L, 
+  joinOverlappingIntrons = FALSE, 
+  verbose = TRUE
+)
+```
+
+After defining the genomic features of interest, extract the sequences of these, and write to a fasta file for later indexing with [Salmon](https://combine-lab.github.io/salmon/).
+```{r}
+genome_path <-
+  here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.fa"
+  )
+genome <- Biostrings::readDNAStringSet(genome_path)
+names(genome) <- sapply(strsplit(names(genome), " "), .subset, 1)
+seqs <- GenomicFeatures::extractTranscriptSeqs(x = genome,
+                                               transcripts = genomic_coord)
+Biostrings::writeXStringSet(
+  seqs,
+  filepath = here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.expanded.fa"
+  )
+)
+
+```
+
+To enable reading the estimated abundances with tximeta, automatically recognizing the underlying transcriptome, we write the expanded annotation to a GTF file.
+
+```{r}
+eisaR::exportToGtf(
+  genomic_coord,
+  filepath = here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.expanded.gtf"
+  )
+)
+```
+
+Alevin quantifies spliced and unspliced features jointly, which requires the splitting of the imported abundances by feature type. The splitting needs to be done in such a way that we can still match up a spliced feature with the corresponding unspliced feature (the metadata of the GRanges object contains a data frame with corresponding spliced and unspliced gene IDs).
+```{r}
+head(metadata(genomic_coord)$corrgene)
+write_tsv(
+  metadata(genomic_coord)$corrgene,
+  path = here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.annotation.expanded.features.tsv"
+  )
+)
+```
+
+
+Create a text file mapping transcript and intron identifiers to the corresponding gene identifiers
+```{r}
+id_to_gene <- eisaR::getTx2Gene(
+  genomic_coord,
+  filepath = here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.annotation.expanded.tx2gene.tsv"
+  )
+)
+```
+
+# Step 2: Index the reference features
+
+After creating the fasta file with transcript and intron sequences, index it using Salmon.
+We add the full genome sequence as decoy sequences which is recommended to avoid reads truly originating from intergenic regions being assigned to a suboptimal transcriptome location. The effect of decoys is usually smaller when both transcripts and introns are being quantified than for "regular" gene expression quantification, since inthe former case a larger fraction of the genome is already covered by the features of interest.
+
+For using Salmon (and Alevin) created a special conda environment (`conda activate salmon`)
+```{bash, eval=FALSE}
+module purge
+module load Anaconda3/2020.02
+conda activate salmon
+
+cd ../data/raw_data/genome_info/human/
+
+grep ">" Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.fa | cut -d ">" -f 2 | cut -d " " -f 1 > Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.chrnames.txt
+
+# Example code wrapped in the Run_salmon_index_on_CAMP.sh
+salmon index -t < (cat Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.expanded.fa Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.fa > combined.fa) \
+  -i Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.expanded \
+  --gencode \
+  -p 32 \
+  -d Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.chrnames.txt
+```
+
+
+```{r, eval=TRUE}
+# For the mouse genome the following took about 1hour
+slurm_cmd <-
+  "sbatch --cpus-per-task=12 --mem=132G -N 1 --time=16:00:00   --output=/camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/analysis/logs/0-2b.Run_salmon_index_on_CAMP.log /camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/analysis/scripts/0-2b.Run_salmon_index_on_CAMP.sh"
+
+slurm_cmd
+system(slurm_cmd)
+```
+
+
+Back in the `scvelo-0.2.2` conda environment in R.
+Create a linked transcriptome with tximeta. This allows tximeta to recognize the reference annotation when reading the alevin quantification, and automatically annotate the resulting SummarizedExperiment object
+```{r}
+salmon_index <-
+  here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.expanded"
+  )
+expanded_fasta <- here(
+  "data",
+  "raw_data",
+  "genome_info",
+  "human",
+  "Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.expanded.fa"
+)
+gtf_file <-
+  here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.expanded.gtf"
+  )
+
+json_file <- here(
+  "data",
+  "raw_data",
+  "genome_info",
+  "human",
+  "Homo_sapiens.GRCh37.75.expanded.json"
+)
+
+tximeta::makeLinkedTxome(
+  indexDir = salmon_index,
+  source = "Ensembl",
+  genome = "GRCh37",
+  organism = "Homo sapiens",
+  release = "75",
+  fasta = expanded_fasta ,
+  gtf = gtf_file,
+  write = TRUE,
+  jsonFile = json_file
+)
+```
+
+Test the json file
+```{r}
+rjson::fromJSON(
+  file =  here(
+    "data",
+  "raw_data",
+  "genome_info",
+  "human",
+  "Homo_sapiens.GRCh37.75.expanded.json"
+  )
+)
+```

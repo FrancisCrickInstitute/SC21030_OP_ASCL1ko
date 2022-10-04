@@ -1,0 +1,90 @@
+---
+title: "SC21030 - HUWE1 mutant hESC neural differentiation"
+author: "Stephanie Strohbuecker"
+subtitle: Label putative doublet cells
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+We label suspected doublets using [scDblFinder](https://bioconductor.org/packages/release/bioc/html/scDblFinder.html) in each of the available samples. `scDblFinder()` adds additional columns to the `colData` slot of the `SingleCellExperiment` object for each sample.
+The two main columns are `scDblFinder.score`, i.e. the final score used, and `scDblFinder.class`, i.e. whether the cell is called as "doublet" or "singlet".
+
+
+```{r}
+RMD_file_name <- "0-7.Label_doublets"
+```
+
+
+
+# Libraries
+```{r}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+library(SingleCellExperiment)
+library(scDblFinder)
+```
+
+
+```{r}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+
+```{r, eval=TRUE}
+alevin_sce <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+       "0-5.Import_alevin_abundances", "alevin_sce_unfiltered_whitelist.RDS"
+    )
+  )
+```
+
+```{r}
+# Path to output and figures directories
+output_dirs <-
+  str_c(here(),
+        "data/derived_data",
+        c("Tables", "R_objects", "Figures"),
+        RMD_file_name,
+        sep = "/") %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+      generate_directories(.x))
+
+set.seed(563)
+```
+
+
+```{r}
+alevin_sce <-
+  map(alevin_sce, function(sce_obj) {
+    rowData(sce_obj)<-
+      rowData(sce_obj)[, c("gene_id", "gene_name", "type", "gene_biotype")]
+    scDb
+  })
+```
+
+
+```{r}
+write_rds(
+  alevin_sce,
+  str_c(output_dirs["R_objects"], "alevin_sce_scDblFinder.RDS", sep = "/"),
+  compress = "gz"
+)
+```
+

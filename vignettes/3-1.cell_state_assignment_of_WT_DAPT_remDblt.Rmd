@@ -1,0 +1,389 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Cell state assignment of WT_DAPT samples
+output:
+  html_notebook: 
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+
+# Project summary (from ASF proposal):
+
+An in vitro model of human cortical neuronal differentiation used in the lab indicated neural progenitors start to differentiate into post-mitotic neurons after day 15 of neural induction. As a result, immunostaining analyses revealed a heterogenous population of cells (actively-dividing neural progenitors and post-mitotic neurons) at day 20. 
+
+Single-cell RNAseq analysis (performed by Stephanie Strohbuecker) of previously submitted wild-type neuronal cells at day 20 revealed an ASCL1-enriched population of cells, which express neural progenitor specific markers, and are found in the G1 phase of the cell cycle, while upregulating cell cycle exit genes (e.g. GADD45G, CDKN1C). Furthermore, this population was also enriched for markers of differentiating neural progenitors (e.g. SOX4, HES6, DLL1), suggesting ASCL1 is upregulated in progenitors just prior to terminal differentiation. RNA velocity analysis further supported this view. 
+
+Additional time-course experiment performed in the lab revealed the ASCL1 expression pattern during human cortical neuronal differentiation. At both the RNA and protein level, ASCL1 shows a progressive increase in expression after day 15 of neuronal differentiation, with a main peak at day 24, which coincides with 24 hours post Notch inhibition. DAPT was added at day 23 to synchronise the culture and make the vast majority of progenitors to exit the cell cycle and differentiate into neurons, corroborating the single-cell RNAseq findings at day 20. 
+
+For the current experiment, three wild-type and three ASCL1 knockout iPSC clones will undergo cortical neuronal differentiation. This time, cells will be collected at day 24, the time point when ASCL1 is highest expressed. With regards to only the wild-type cells, we would like to repeat the day 20 analyses performed by Stephanie on this later timepoint to show the existence of this ASCL1-eriched population (as we have other experiments conducted at this timepoint we wish to support). Secondly, we would like to compare wild-type cells at day 24 with and without Notch inhibitor treatment, to show that DAPT treatment results in a shift to a more homogenous population of ASCL1-positive cells that have the same identity as the ones identified in the absence of Notch inhibition. 
+
+Secondarily,  we would like to determine differentially expressed genes in cortical neuronal cultures at day 24 generated from wild-type versus ASCL1 knockout iPSCs to determine if the neurons formed from ASCL1 knockout cells are different from wild-type cells, since the controls (day 24 cells with DAPT) can be shared for both purposes. 
+
+
+```{r}
+RMD_file_name <- "3-1.cell_state_assignment_of_WT_DAPT_remDblt"
+```
+
+```{r}
+options(future.globals.maxSize = 48 * 1024^3, future.rng.onMisuse="ignore")
+```
+
+# Libraries
+```{r message=FALSE}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+library(DT)
+
+library(Seurat)
+```
+
+```{r}
+# This code blocks enables the usage of datatable within a loop to generate tabsets for each comparison
+# we simply select the table, look for the parent container 
+# and remove it from the DOM
+# function from https://stackoverflow.com/questions/49823785/dynamic-tabsets-with-containing-js-r-markdown
+jsc <-
+  'function(settings, json) { $(this).parents(".datatables").remove(); }'
+datatable(matrix(NA, 2, 2), options = list("initComplete" = htmlwidgets::JS(jsc)))
+```
+
+```{r message=FALSE, warning=FALSE}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+
+```{r, eval=TRUE}
+seur_objs <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+      "2-2.Integration_of_sampleRepl_remDblt",
+      "integrated_seurat_object_pre-processed.RDS"
+    )
+  )
+
+cell_state_markers <-
+  readxl::read_xlsx(
+    here(
+      "data",
+      "raw_data",
+      "project_docs",
+      "Updated_Cell_type_genelists.xlsx"
+    )
+  ) %>%
+  pivot_longer(cols = everything(),
+               names_to = "cell_state",
+               values_to = "gene_id") %>%
+  arrange(cell_state) %>%
+  filter(!is.na(gene_id)) %>%
+  distinct() %>% 
+  group_by(cell_state) %>%
+  group_split() %>%
+  set_names(map(., ~ unique(.x$cell_state) %>%
+                  str_replace_all(" ", "_")))
+```
+
+```{r}
+# Path to output and figures directories
+
+output_dirs <-
+  str_c(here(),
+        "data/derived_data",
+        c("Tables", "R_objects", "Figures"),
+        RMD_file_name,
+        sep = "/") %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+      generate_directories(.x))
+```
+
+We will extract the `seur_obj` for WT-DAPT sample set for further analysis
+```{r}
+seur_obj <- seur_objs$WT_DAPT
+seur_name <- "WT_DAPT"
+
+rm(seur_objs)
+```
+
+
+For the initial analysis we used the clustering resolutions: 1 which shows interesting cell marker distributions
+
+```{r}
+seur_obj@misc$clustering_resolution <- "integrated_snn_res.1"
+```
+
+```{r}
+seur_obj@misc$clust_res_of_interest <- c(0.8,1,1.2)
+```
+
+The previous dimensional reduction resulted in two clustering resolutions of interest. Furthermore, clustering seems to be driven, at least in part, by cell cycle phase, as cells seem to separate largely according to "Phase". In a developmental model system, such as this neuronal differentiation system, cell cycle is likely an (important) part of the underlying biological system and its regression needs to be considered carefully.
+
+```{r fig.height=13, fig.width=16, message=FALSE, warning=FALSE, results="hide", fig.keep="all"}
+dim_plots <-
+  map(seur_obj@misc$clust_res_of_interest, function(res_of_int) {
+    int_res <- str_c("integrated_snn_res", res_of_int, sep = ".")
+    DimPlot(seur_obj,
+            label = TRUE,
+            group.by = int_res) +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL)
+  }) %>%
+ggarrange(
+  plotlist  = .,
+  align = "hv",
+  nrow = 2,
+  ncol = 2
+)
+
+ggarrange(
+  dim_plots,
+  # grouped_plots,
+  align = "hv",
+  nrow = 1,
+  ncol = 1
+) %>%
+  annotate_figure(top = text_grob(
+    str_replace_all(seur_name, "_", " "),
+    face = "bold",
+    size = 16
+  ))
+
+DimPlot(seur_obj,
+          label = FALSE,
+          group.by = "Phase") +
+    coord_fixed(ratio = 1) +
+    scale_x_discrete(breaks = NULL) +
+    scale_y_discrete(breaks = NULL)
+```
+
+# Identification of cell states
+
+To further characterize the identified cluster we can use a set of known markers or identify marker genes by running a differential expression between each cluster and the remainder of the cells in this dataset.
+
+### Expression of known marker genes
+
+Oana Paun provided a set of known maker genes for ASCL1 and Neural progenitors as well as excitatory and Inhibitory neurons  in `Cell_type_genelists.xlsx`.
+```{r}
+cell_state_markers <-
+  cell_state_markers[c(
+    "Cycling_Progenitors",
+    "ASCL1_Progenitors",
+    "Neurons"
+  )]
+```
+
+We will choose RNA assay and use LogNormalize to continue with downstream analysis.  
+Identify list of genes which are present in the integrated dataset from each cell state marker gene list
+```{r}
+"RNA" -> DefaultAssay(seur_obj)
+seur_obj <- NormalizeData(seur_obj)
+# Indetify missing marker genes from the Default assay object of the seurat data
+map(cell_state_markers, ~.x$gene_id[!(.x$gene_id %in% rownames(seur_obj))])
+```
+
+
+```{r fig.height=14, fig.width=15, message=FALSE, warning=FALSE, results="hide",fig.keep="all"}
+map(seur_obj@misc$clust_res_of_interest, function(res_of_interest) {
+  res_of_interest <- str_c("integrated_snn_res.", res_of_interest)
+  Idents(seur_obj) <- (res_of_interest)
+  res <-
+    str_remove(res_of_interest, "integrated_snn_res.")
+  imap(cell_state_markers, function(gene_list, gl_name) {
+    DotPlot(seur_obj, features = gene_list$gene_id) +
+      theme(axis.text.x = element_text(
+        angle = 90,
+        hjust = 1,
+        vjust = 0.5
+      )) +
+      scale_colour_viridis_c() +
+      labs(subtitle = gl_name)
+  }) %>%
+    ggarrange(plotlist = ., align = "hv") %>%
+    annotate_figure(top = text_grob(
+      str_c("Clustering resolution used", res, sep = ": "),
+      face = "bold",
+      size = 16
+    ), bottom = text_grob(
+      seur_name,
+      face = "bold",
+      size = 16
+    ))
+})
+```
+
+
+Rather than investigating each gene individually, we can calculate a module score for each set of cell type markers. The `AddModuleScore()` function calculates the average expression levels of each program on the single cell level, subtracted by the aggregated expression of control feature sets. All analysed features are binned based on average expression, and the control features are randomly selected from each bin.
+
+Note that there are considerable overlaps 
+
+```{r}
+# We get the module score for each resolution chosen
+    feats <- cell_state_markers %>% map( ~ .x %>% filter(gene_id %in% rownames(seur_obj)) %>% pull(gene_id))
+    feats <- discard(feats, names(feats)%in% colnames(seur_obj@meta.data))
+    seur_obj <-
+      AddModuleScore(seur_obj, features = feats, name = names(feats), assay = "RNA")
+    seur_obj@meta.data <-
+      rename_with(seur_obj@meta.data,
+                  .cols = starts_with(names(feats)) ,
+                  ~ str_remove_all(., "\\d$"))
+```
+
+A positive module score would suggest that this module of genes is expressed in a particular cell more highly than would be expected, given the average expression of this module across the population.
+```{r message=FALSE, warning=FALSE, results="hide",fig.keep="all", fig.height=8}
+
+Idents(seur_obj) <- seur_obj@misc$clustering_resolution
+res <-
+  str_remove(seur_obj@misc$clustering_resolution, "integrated_snn_res.")
+
+DotPlot(seur_obj, features = names(cell_state_markers)) +
+  # scale_x_discrete(labels = genes) +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    hjust = 1,
+    vjust = 0.5
+  ),
+  axis.title.x = element_blank()) +
+  scale_colour_viridis_c() +
+  labs(title = str_c("Module scores, Clustering resolution:", res, sep = " "))
+
+```
+
+
+
+
+```{r message=FALSE, warning=FALSE, results="hide",fig.keep="all", fig.height=8}
+
+Idents(seur_obj) <- "integrated_snn_res.1.2"
+res <- "1.2"
+
+DotPlot(seur_obj, features = names(cell_state_markers)) +
+  # scale_x_discrete(labels = genes) +
+  theme(axis.text.x = element_text(
+    angle = 90,
+    hjust = 1,
+    vjust = 0.5
+  ),
+  axis.title.x = element_blank()) +
+  scale_colour_viridis_c() +
+  labs(title = str_c("Module scores, Clustering resolution:", res, sep = " "))
+
+```
+
+We can also visualise the module scores in a UMAP plot:
+
+```{r message=FALSE, warning=FALSE,  fig.height=10, fig.width=12, results="hide",fig.keep="all"}
+imap(names(cell_state_markers), ~ {
+  FeaturePlot(seur_obj, 
+              features = .x,
+              combine = TRUE) +
+    coord_fixed(ratio = 1) +
+    scale_x_discrete(breaks = NULL) +
+    scale_y_discrete(breaks = NULL) +
+    scale_colour_viridis_c()
+}) %>%
+  ggarrange(plotlist = .) %>% 
+  annotate_figure(top = text_grob(seur_name, face = "bold", size = 16))
+```
+
+The existence of trajectories can often be detected in PCA space. When plotting the first two PCs we can observe a potential trajectory connecting neural progenitors with neurons via ASCL1 progenitor cells.
+
+```{r message=FALSE, warning=FALSE, fig.height=9, fig.width=14, results="hide",fig.keep="all"}
+imap(names(cell_state_markers), ~ {
+  FeaturePlot(seur_obj,
+              features = .x,
+              combine = TRUE,
+              reduction = "pca") +
+    coord_fixed(ratio = 1) +
+    scale_x_discrete(breaks = NULL) +
+    scale_y_discrete(breaks = NULL) +
+    scale_colour_viridis_c()
+}) %>%
+  ggarrange(plotlist = .) %>% 
+  annotate_figure(top = text_grob(seur_name, face = "bold", size = 16))
+
+```
+
+We further investigated the existence of a trajectory using RNA velocity with [scVelo](https://scvelo.readthedocs.io/) in Python.
+
+
+```{r eval=TRUE, include=FALSE}
+
+  res <- "1"
+  dfr <- seur_obj[[]] %>%
+    as_tibble(rownames = "cell_ids") %>%
+    select(
+      cell_ids,
+      seur_obj@misc$clustering_resolution
+    ) %>%
+    rename(
+      !!str_c("cell_classification_res", res, sep = ".") :=  2) %>% 
+    column_to_rownames(var = "cell_ids")
+  
+  seur_obj <- AddMetaData(seur_obj, metadata = dfr)
+  Idents(seur_obj) <- str_c("cell_classification_res", res, sep = ".")
+  
+  new.cluster.ids <- c('0_ASCL1 Progenitors', '1_Cycling Progenitors', '2_ASCL1 Progenitors', '3_Cycling Progenitors', '4_Cycling Progenitors', 
+                       '5_Cycling Progenitors', '6_Neurons', '7_ASCL1 Progenitors', '8_Neurons', '9_Neurons', '10_Cycling Progenitors', 
+                       '11_Neurons', '12_Cycling Progenitors', '13_Cycling Progenitors', '14_Neurons', '15_Cycling Progenitors', '16_Neurons',
+                       '17_Cycling Progenitors', '18_Cycling Progenitors', '19_Cycling Progenitors', '20_Neurons', '21_Cycling Progenitors')
+        
+  names(new.cluster.ids) <- levels(seur_obj)
+  seur_obj <- RenameIdents(seur_obj, new.cluster.ids)
+  seur_obj@meta.data <- seur_obj@meta.data %>% 
+    mutate(!!str_c("cell_classification_res", res, sep = ".") := Idents(seur_obj)) 
+    
+  seur_obj$group_cell_classification_res.1 <- case_when(as.vector(seur_obj[[seur_obj@misc$clustering_resolution]][[1]]) %in% c('1','3','4','5','10','12','13','15','17','18','19','21') ~ 'Cycling Progenitors',
+                           as.vector(seur_obj[[seur_obj@misc$clustering_resolution]][[1]]) %in% c('0','2','7') ~ 'ASCL1 Progenitors',
+                           as.vector(seur_obj[[seur_obj@misc$clustering_resolution]][[1]]) %in% c('6','8','9','11','14','16','20') ~ 'Neurons')
+```
+
+
+Plot for cell states assigned to clusters 
+```{r}
+res <-
+    str_remove(seur_obj@misc$clustering_resolution, "integrated_snn_res.")
+DimPlot(seur_obj,
+            label = F,
+            group.by = "group_cell_classification_res.1") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL) +
+  ggtitle(paste0("Cell classification using res: ", res))
+```
+
+
+```{r}
+write_rds(
+  seur_obj,
+  str_c(
+    output_dirs["R_objects"],
+    "integrated_seurat_object_cell_state_assign_RNA.RDS",
+    sep = "/"
+  )
+)
+# seur_obj <- read_rds(
+#   str_c(
+#     output_dirs["R_objects"],
+#     "integrated_seurat_object_cell_state_assign_RNA.RDS",
+#     sep = "/"
+#   )
+# )
+```
+
+
+

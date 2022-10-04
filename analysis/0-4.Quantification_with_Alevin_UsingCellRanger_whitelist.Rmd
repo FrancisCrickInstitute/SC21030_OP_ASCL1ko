@@ -1,0 +1,179 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Quantification with Alevin (Salmon) using whitelist barcodes from CellRanger
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+
+```{r}
+RMD_file_name <- "0-4.Quantification_with_Alevin_UsingCellRanger_whitelist"
+```
+
+In the following we follow the tutorial for [Alevin Velocity](https://combine-lab.github.io/alevin-tutorial/2020/alevin-velocity/):
+
+This script contains 
+
+**Step3: Quantify with Alevin**
+
+# Libraries
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Locating the raw fastq files
+
+```{r}
+proj_info <- read_tsv("../.babs", col_names = FALSE) %>% 
+  separate(col = X1, into = c("descriptor", "specification"), sep =":") %>% 
+  mutate(specification = trimws(specification))
+```
+
+All the folders can be accessed through:
+```{r}
+raw_data_base <- str_c(
+  "/camp/stp/babs/inputs/sequencing/data",
+  proj_info$specification[proj_info$descriptor == "Lab"],
+  "yu-xuan.tan",
+  "SC21030",
+  # proj_info$specification[proj_info$descriptor == "Scientist"],
+  # proj_info$specification[proj_info$descriptor == "Lims"],
+  sep = "/"
+)
+
+(raw_fastq_dir <- str_c(raw_data_base, "primary_data", sep = "/"))
+```
+
+The fastq files are associated with the following sequencing runs:
+```{r}
+list.dirs(raw_fastq_dir, full.names = FALSE, recursive = FALSE)
+```
+
+
+The associated design file contains the following information about the samples:
+```{r}
+(meta_data <- read_csv(here("data", "raw_data", "project_docs", "SC21030_ExperimentalTable.csv")))
+(meta_data_orig <- read_csv(list.files(raw_data_base, pattern = ".csv$", full.names = TRUE)) %>%  arrange(sample_lims))
+  # read_csv(list.files(raw_data_base, pattern = ".csv$", full.names = TRUE))) # there is a problem with this file
+```
+
+```{r}
+logs_dir <- here("analysis", "logs")
+
+pkgload::load_all() # load all the functions available in this project
+generate_directories(str_c(here(), "data", "derived_data", "alevin_quantification_whitelist", sep = "/"))
+```
+
+
+
+After the generation of the index, exonic and intronic abundances are quantified with [Alevin](https://salmon.readthedocs.io/en/latest/alevin.html).
+```{bash, eval=FALSE}
+salmon alevin -l ISR -i Homo_sapiens.GRCh38.dna_sm.primary_assembly.expanded \
+  -1 TAN2457A1_S13_L004_R1_001.fastq.gz \
+  -2 TAN2457A1_S13_L004_R2_001.fastq.gz \
+  -o alevin_out -p 32 --tgMap Homo_sapiens.GRCh38.95_HUWE1KO_CreERT_NeoR.annotation.expanded.tx2gene.tsv \
+  --chromiumV3 --dumpFeatures \
+  --whitelist barcodes.tsv
+```
+
+
+
+```{r}
+cellranger.dir <- str_c("data", "derived_data", "CellRanger_quantification", sep = "/")
+
+# Note ~10threads is recommended by Alevin documentation
+slurm_cmds <- meta_data_orig %>%
+  filter(sample_lims %in% meta_data$`LIMS ID`) %>% 
+  group_by(sample_lims) %>%
+  group_split() %>%
+  {
+    set_names(., map(. , ~ unique(.x$sample_lims)))
+  } %>%
+  imap(function(sampl, sampl_nam) {
+    read1_info <- str_c(sampl$fastq_1, collapse = " ")
+    read2_info <- str_c(sampl$fastq_2, collapse = " ")
+    organism <- unique(sampl$species) %>%  str_replace(" ", "_")
+    slurm_cmd <-
+      str_c("sbatch -c 12 --time=12:00:00  --output=", 
+        logs_dir,
+        "/",
+        sampl_nam,
+        "_0-4.Quantification_with_Alevin_UsingCellRanger_whitelist.log",
+        " /camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/analysis/scripts/0-4.Run_Alevin_quantification_on_CAMP_withWhitelist.sh '",
+        read1_info,
+        "' '",
+        read2_info,
+        "' ",
+        sampl_nam,
+        " '",
+        cellranger.dir,
+        "' ",
+        sep = ""
+      )
+    # system(slurm_cmd)
+    slurm_cmd
+  })
+```
+
+Quantifying all samples using SLURM batches
+```{r}
+slurm_cmds %>% map(~system(.x))
+```
+
+Note that mapping the data for this experiment took less than an hour per sample.
+
+
+# Running alevinQC for summary QC statistics
+
+```{r eval=TRUE}
+library(alevinQC)
+```
+
+
+```{r eval=TRUE}
+alevin_quantifications <-
+  here("data", "derived_data", "alevin_quantification_whitelist")
+
+sample_meta <- meta_data %>% 
+  mutate(class.group = str_c(Genotype, Treatment, sep = " ")) %>% 
+  mutate(alevin_files = str_c(
+    alevin_quantifications,
+    `LIMS ID`,
+    sep = "/"
+  )) 
+  
+```
+
+
+Check that the alevin input files are provided
+```{r eval=TRUE}
+map(sample_meta$alevin_files, ~checkAlevinInputFiles(.x))
+```
+
+Subsequently we generate a html QC report for each of the samples
+```{r eval=TRUE}
+map(1:nrow(sample_meta), 
+    ~alevinQCReport(
+      baseDir = sample_meta$alevin_files[.x],
+      sampleId = str_c(sample_meta$`LIMS ID`[.x], sample_meta$class.group[.x], sep = " "),
+      outputFile = str_c(sample_meta$`LIMS ID`[.x], "alevinReport.html", sep =
+                           "_"),
+      outputFormat = "html_document",
+      outputDir = sample_meta$alevin_files[.x],
+      forceOverwrite = TRUE
+    ))
+```
+
+
+
+
+

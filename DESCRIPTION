@@ -1,0 +1,20 @@
+Package: asf-SC21030
+Title: ASCL1-KO cortical neural differentiation day24 with Notch
+    inhibition
+Version: 0.0.0.9000
+Authors@R: 
+    c(person("Avinash", "Ghanate", , "avinash.ghanate@crick.ac.uk", role = c("aut", "cre"),
+           comment = c(ORCID = "0000-0002-6284-7667")),
+           person(given = "BABS",
+             role = c("aut", "cre"),
+             email = "bioinformatics@crick.ac.uk"))
+Description: Scrnaseq analysis for oana.paun@crick.ac.uk with the project
+    title ASCL1-KO cortical neural differentiation day24 with Notch
+    inhibition. For more information please refer to the project proposal
+    .docx in ./data/raw_data/project_docs.
+License: GLP-3
+Depends: 
+    R(>= 4.0.0)
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.1.2

@@ -1,0 +1,137 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Quantification with CellRanger
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+
+```{r}
+RMD_file_name <- "0-3.Quantification_with_CellRanger"
+```
+
+
+While we plan to use the alevin quantifications for subsequent analysis due to compatibility with scVelo input. We also ran CellRanger to ensure that the quantification results are comparable between the two methods.
+
+# Libraries
+```{r}
+library(tidyverse)
+library(here)
+```
+
+# Locating the raw fastq files
+
+```{r}
+proj_info <- read_tsv("../.babs", col_names = FALSE) %>% 
+  separate(col = X1, into = c("descriptor", "specification"), sep =":") %>% 
+  mutate(specification = trimws(specification))
+```
+
+All the folders can be accessed through:
+```{r}
+raw_data_base <- str_c(
+  "/camp/stp/babs/inputs/sequencing/data",
+  proj_info$specification[proj_info$descriptor == "Lab"],
+  "yu-xuan.tan",
+  "SC21030",
+  # proj_info$specification[proj_info$descriptor == "Scientist"],
+  # proj_info$specification[proj_info$descriptor == "Lims"],
+  sep = "/"
+)
+
+(raw_fastq_dir <- str_c(raw_data_base, "primary_data", sep = "/"))
+```
+
+The fastq files are associated with the following sequencing runs:
+```{r}
+list.dirs(raw_fastq_dir, full.names = FALSE, recursive = FALSE)
+```
+
+
+```{r}
+fastq_dirs <-
+  str_c(
+    list.dirs(raw_fastq_dir, full.names = TRUE, recursive = FALSE),
+    "fastq",
+    sep = "/"
+  )
+```
+
+The associated design file contains the following information about the samples:
+```{r}
+(meta_data <- read_csv(here("data", "raw_data", "project_docs", "SC21030_ExperimentalTable.csv")))
+(meta_data_orig <- read_csv(list.files(raw_data_base, pattern = ".csv$", full.names = TRUE)) %>%  arrange(sample_lims))
+
+fastq_dirs_list <- fastq_dirs %>% 
+  as.tibble() %>% 
+  mutate(files = map(value, ~map(meta_data$`LIMS ID`, function(y) str_match(paste(list.files(.x), collapse = ","), y)))) %>% 
+  mutate(files = map(files, ~unlist(.x) %>% is.na())) %>% 
+  {
+    test <- as.data.frame(.$files) %>% t() 
+    rownames(test) <- .$value
+    test
+  }
+```
+
+```{r}
+pkgload::load_all() # load all the functions available in this project
+generate_directories(str_c(here(), "data", "derived_data", "CellRanger_quantification", sep = "/"))
+```
+
+Note that due to the fact that we are using a custom reference genome for this project, we need to index this genome for use with CellRanger:
+```{bash, eval=FALSE}
+cellranger mkref \
+    --genome=CellRanger_Homo_sapiens.GRCh38.dna_sm.primary_assembly_CreERT \
+    --fasta=/camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/data/raw_data/genome_info/human/Homo_sapiens.GRCh37.75.dna_sm.primary_assembly.fa \
+    --genes=/camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/data/raw_data/genome_info/human/Homo_sapiens.GRCh37.75.gtf \
+    --nthreads 16
+```
+
+```{r, eval=TRUE}
+slurm_cmd <-
+  "sbatch --cpus-per-task=16 --mem=32G -N 1 --time=16:00:00   --output=/camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/analysis/logs/0-3.Run_cellranger_indexing_on_CAMP.log /camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/analysis/scripts/0-3b.Run_cellRanger_indexing.sh"
+
+slurm_cmd
+system(slurm_cmd)
+```
+
+
+
+
+
+Quantification using CellRanger against the custom reference genome
+```{r}
+slurm_cmds <- meta_data_orig %>%
+  filter(sample_lims %in% meta_data$`LIMS ID`) %>% 
+  select(sample_lims) %>% 
+  distinct(sample_lims) %>% 
+  pull(sample_lims) %>% 
+  imap(function(sample_nam, idx){
+  # note adding --test-only will only test the command with SLURM
+  slurm_cmd <-
+    str_c(
+      "sbatch -c 16 --time=24:00:00 --output=/camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/analysis/logs/",
+      sample_nam,
+      "_0-3a.Run_cellRanger_quantification.log /camp/stp/babs/working/ghanata/projects/guillemotf/oana.paun/ASCL1_KO_cortical_neural_differentiation_day24_with_Notch_inhibition/analysis/scripts/0-3a.Run_cellRanger_quantification.sh ", 
+      sample_nam, " ",
+      paste(fastq_dirs[!fastq_dirs_list[,idx]], collapse = ","),
+      sep = ""
+    )
+  # system(slurm_cmd) # Note there are issues with sending things to the cluster with a script that requires `module`
+  slurm_cmd
+})
+```
+
+Running quantification on all samples
+```{r}
+slurm_cmds %>% map(~system(.x))
+```
+

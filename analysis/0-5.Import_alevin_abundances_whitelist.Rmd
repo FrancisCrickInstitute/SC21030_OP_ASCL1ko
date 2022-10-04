@@ -1,0 +1,222 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Import Alevin quantification with tximeta
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+With the following we import the alevin quantifications into a `SummarizedExperiment` object.
+
+```{r}
+RMD_file_name <- "0-5.Import_alevin_abundances"
+```
+
+We follow the tutorial for [Alevin Velocity](https://combine-lab.github.io/alevin-tutorial/2020/alevin-velocity/):
+
+This script contains 
+
+* Step 4: Import abundances into R with `tximeta`
+
+# Libraries
+```{r}
+library(tidyverse)
+library(here)
+
+library(tximeta)
+library(SingleCellExperiment)
+
+library(org.Hs.eg.db)
+library(plyranges)
+library(fishpond)
+```
+
+```{r}
+# to fix SSL certificate problems with biomaRt
+httr::set_config(httr::config(ssl_verifypeer = FALSE))
+```
+
+
+```{r}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+
+The `tximeta` can be used to import alevin quantifications and generate a `SummarizedExperiment` object.
+
+```{r}
+linked_anno <-
+  here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.expanded.json"
+  )
+
+cg_anno_path <-
+  here(
+    "data",
+    "raw_data",
+    "genome_info",
+    "human",
+    "Homo_sapiens.GRCh37.75.annotation.expanded.features.tsv"
+  )
+
+alevin_quantifications <-
+  here("data", "derived_data", "alevin_quantification_whitelist")
+
+sample_meta <- 
+  read_csv(here("data", "raw_data", "project_docs", "SC21030_ExperimentalTable.csv")) %>% 
+  mutate(sample_id = `LIMS ID`) %>% 
+  mutate(class.group = str_c(Genotype, Treatment, sep = " ")) %>% 
+  mutate(alevin_files = str_c(
+    alevin_quantifications,
+    `LIMS ID`,
+    "alevin/quants_mat.gz",
+    sep = "/"
+  )) 
+
+# Path to output and figures directories
+
+output_dirs <-
+  str_c(here(),
+        "data/derived_data",
+        c("Tables", "R_objects", "Figures"),
+        RMD_file_name,
+        sep = "/") %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+      generate_directories(.x))
+
+```
+
+Load the linked transcriptome generated in script `0-2.Generate_index_for_Alevin.Rmd`.
+```{r}
+tximeta::loadLinkedTxome(linked_anno)
+```
+
+Load the data frame linking spliced and unspliced gene identifiers required as input into `tximeta::splitSE()`.
+```{r}
+cg_anno <- read.delim(cg_anno_path, header = TRUE, as.is = TRUE)
+## Rename the 'intron' column 'unspliced' to make assay names compatible with scVelo
+colnames(cg_anno)[colnames(cg_anno) == "intron"] <- "unspliced"
+```
+
+
+Before running the tximeta code to load the alevin quanitfications we need to change the default cache location for `AnnotationHub`.
+```{r}
+AnnotationHub::setAnnotationHubOption("CACHE",
+                                      here("data",
+                                           "raw_data",
+                                           "genome_info",
+                                           "AnnotationHub"))
+```
+
+```{r}
+generate_directories(here("data",
+                          "raw_data",
+                          "genome_info",
+                          "AnnotationHub"))
+```
+
+
+Load the alevin quantifications. Note that alevin currently only supports one sample. 
+The `txi` object contains a single assay (‘counts’) containing both spliced and unspliced abundances. We use the `splitSE` function to split this into two matrices, one with spliced and one with unspliced counts.
+After having generated the required information the `SummarizedExperiment` is converted into a `SingleCellExperiment`.
+```{r}
+txi_anno <- map(sample_meta$sample_id,
+                 ~ {
+                   sample_info_df <- sample_meta %>%
+                     dplyr::filter(sample_id == .x) %>% 
+                     dplyr::select(files = 	alevin_files, names = sample_id)
+                   txi <-
+                     tximeta::tximeta(coldata = sample_info_df,
+                                      type = "alevin",
+                                      skipMeta = TRUE)
+                   txi <- tximeta::splitSE(txi, cg_anno, assayName = "counts")
+                   txi <- as(txi, "SingleCellExperiment")
+                   assays(txi) <- list(
+                     counts = assay(txi, "spliced"),
+                     spliced = assay(txi, "spliced"),
+                     unspliced = assay(txi, "unspliced")
+                   )
+                   txi
+                 }) %>%
+  set_names(sample_meta$sample_id)
+```
+
+The `tximeta` approach for loading gene information does not work in this particular instance as we used custom genomes. We therefore use the information from the gtf file to provide gene annotation.
+
+```{r}
+gtf_exp <-
+  here("data", "raw_data", "genome_info", "human", "Homo_sapiens.GRCh37.75.expanded.gtf")
+gtf <- here("data", "raw_data", "genome_info", "human", "Homo_sapiens.GRCh37.75_filtered.gtf")
+gtf_exp <- read_gff(gtf_exp)
+gtf <- read_gff(gtf)
+```
+
+
+```{r}
+gene_name <- gtf %>% 
+  as_tibble() %>% 
+  dplyr::select(gene_id, gene_name, gene_biotype) %>% 
+  distinct()
+```
+
+```{r}
+gtf <-
+  gtf_exp %>%
+  filter(type == "gene") %>%
+  as_tibble() %>%
+  mutate(gene_id_adj = str_remove(gene_id, "-.*")) %>%
+  left_join(gene_name, by = c("gene_id_adj" = "gene_id")) %>%
+  dplyr::select(-starts_with("transcript"),
+         -starts_with("exon"),
+         -gene_id_adj) %>%
+  as_granges()
+```
+
+```{r}
+# Select only those genes that are present in the txi_anno objects
+gtf <- gtf[(gtf$gene_id %in% rownames(txi_anno$TAN2457A19) )]
+```
+
+```{r}
+gtf_tib <- gtf %>% 
+  as_tibble() %>% 
+  filter(!is.na(gene_biotype)) %>% 
+  mutate(gene_id1 = gene_id) %>% 
+  column_to_rownames(var = "gene_id1")
+```
+
+```{r}
+txi_anno <- map(txi_anno, function(txi){
+  gtf_df <- gtf_tib[rownames(rowData(txi)), ]
+  rowData(txi) <- gtf_df
+  txi
+})
+```
+
+```{r}
+write_rds(
+  txi_anno,
+  str_c(output_dirs["R_objects"], "alevin_sce_unfiltered_whitelist.RDS", sep = "/"),
+  compress = "gz"
+)
+```
+
+
+
+
+
+

@@ -1,0 +1,424 @@
+---
+title: "SC21030 - ASCL1-KO cortical neural differentiation day24 with Notch inhibition"
+author: "Avinash Ghanate"
+subtitle: Cell state label transfer of WT_DAPT samples to ASCL1 ko samples
+output:
+  html_notebook: 
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+
+# Project summary (from ASF proposal):
+
+An in vitro model of human cortical neuronal differentiation used in the lab indicated neural progenitors start to differentiate into post-mitotic neurons after day 15 of neural induction. As a result, immunostaining analyses revealed a heterogenous population of cells (actively-dividing neural progenitors and post-mitotic neurons) at day 20. 
+
+Single-cell RNAseq analysis (performed by Stephanie Strohbuecker) of previously submitted wild-type neuronal cells at day 20 revealed an ASCL1-enriched population of cells, which express neural progenitor specific markers, and are found in the G1 phase of the cell cycle, while upregulating cell cycle exit genes (e.g. GADD45G, CDKN1C). Furthermore, this population was also enriched for markers of differentiating neural progenitors (e.g. SOX4, HES6, DLL1), suggesting ASCL1 is upregulated in progenitors just prior to terminal differentiation. RNA velocity analysis further supported this view. 
+
+Additional time-course experiment performed in the lab revealed the ASCL1 expression pattern during human cortical neuronal differentiation. At both the RNA and protein level, ASCL1 shows a progressive increase in expression after day 15 of neuronal differentiation, with a main peak at day 24, which coincides with 24 hours post Notch inhibition. DAPT was added at day 23 to synchronise the culture and make the vast majority of progenitors to exit the cell cycle and differentiate into neurons, corroborating the single-cell RNAseq findings at day 20. 
+
+For the current experiment, three wild-type and three ASCL1 knockout iPSC clones will undergo cortical neuronal differentiation. This time, cells will be collected at day 24, the time point when ASCL1 is highest expressed. With regards to only the wild-type cells, we would like to repeat the day 20 analyses performed by Stephanie on this later timepoint to show the existence of this ASCL1-eriched population (as we have other experiments conducted at this timepoint we wish to support). Secondly, we would like to compare wild-type cells at day 24 with and without Notch inhibitor treatment, to show that DAPT treatment results in a shift to a more homogenous population of ASCL1-positive cells that have the same identity as the ones identified in the absence of Notch inhibition. 
+
+Secondarily,  we would like to determine differentially expressed genes in cortical neuronal cultures at day 24 generated from wild-type versus ASCL1 knockout iPSCs to determine if the neurons formed from ASCL1 knockout cells are different from wild-type cells, since the controls (day 24 cells with DAPT) can be shared for both purposes. 
+
+
+
+```{r}
+RMD_file_name <- "3-2.cell_state_labelTransfer_of_WT_DAPT_remDblt"
+```
+
+```{r}
+options(future.globals.maxSize = 48 * 1024^3, future.rng.onMisuse="ignore")
+```
+
+
+```{r message=FALSE}
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+library(DT)
+
+library(Seurat)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+
+```{r, eval=TRUE}
+seur_obj <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+      "3-1.cell_state_assignment_of_WT_DAPT_remDblt",
+      "integrated_seurat_object_cell_state_assign_RNA.RDS"
+    )
+  )
+seur_name <- "WT_DAPT"
+```
+
+```{r}
+# Path to output and figures directories
+output_dirs <-
+  str_c(here(),
+        "data/derived_data",
+        c("Tables", "R_objects", "Figures"),
+        RMD_file_name,
+        sep = "/") %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+      generate_directories(.x))
+```
+
+
+The current cell state assigned UMAP plot for WT_DAPT samples looks like following. 
+```{r fig.height=13, fig.width=16, message=FALSE, warning=FALSE, results="hide", fig.keep="all"}
+res <-
+    str_remove(seur_obj@misc$clustering_resolution, "integrated_snn_res.")
+
+dim_plots <-
+  map(
+    DimPlot(seur_obj,
+            label = TRUE,
+            group.by = c(seur_obj@misc$clustering_resolution, "group_cell_classification_res.1"),
+            combine = FALSE),
+    ~ .x +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL)
+  ) %>%
+ggarrange(
+  plotlist  = .,
+  align = "hv",
+  nrow = 1,
+  ncol = 2
+)
+
+grouped_plots <- ggarrange(
+  DimPlot(seur_obj,
+          label = FALSE,
+          group.by = "Phase") +
+    coord_fixed(ratio = 1) +
+    scale_x_discrete(breaks = NULL) +
+    scale_y_discrete(breaks = NULL),
+
+  DimPlot(seur_obj,
+          label = FALSE,
+          group.by = "scDblFinder.class") +
+    coord_fixed(ratio = 1) +
+    scale_x_discrete(breaks = NULL) +
+    scale_y_discrete(breaks = NULL),
+  
+  align = "hv",
+  nrow = 1,
+  ncol = 2
+)
+
+ggarrange(
+  dim_plots,
+  grouped_plots,
+  align = "hv",
+  nrow = 2,
+  ncol = 1
+) %>%
+  annotate_figure(top = text_grob(
+    str_replace_all(seur_name, "_", " "),
+    face = "bold",
+    size = 16
+  ))
+
+```
+
+# Label transfer from WT_DAPT to ASCL1ko_DAPT
+
+We will use this cell state labels as a reference data to define cell states in the ASCL1ko_DAPT sample groups using cell type label transfer and projecting ASCL1ko_DAPT cells onto WT_DAPT UMAPs. This can be achieved using a workflow similar to integration of datasets (both procedures begin by identifying anchors), there are two important distinctions between data transfer and integration:
+
+1. In data transfer, Seurat does not correct or modify the query expression data.
+1. In data transfer, Seurat has an option (set by default) to project the PCA structure of a reference onto the query, instead of learning a joint structure with CCA.
+
+### UMAP embeddings of WT_DAPT with model
+We will start by calculating UMAP again, but this time with `retun.model` set tot `TRUE`, which is useful for projecting the query dataset on reference UMAP embeddings.
+```{r results='hide'}
+seur_obj <- seur_obj %>%
+    RunUMAP(
+      dims = seur_obj@misc$nb_PCs,
+      verbose = TRUE,
+      umap.method = "uwot",
+      metric = "cosine",
+      return.model = TRUE
+    )
+```
+
+### Transfer anchors
+```{r}
+seur_objs <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+      "2-6.Integration_of_sampleRepl_remDblt",
+      "integrated_seurat_object_pre-processed.RDS"
+    )
+  )
+```
+
+Similar to the integration anchors, we will find a set of anchors between a reference and query object for label transfers using PCA from reference dataset.
+```{r results='hide'}
+DefaultAssay(seur_obj) <- "integrated"
+seur_objs <- seur_objs[c("ASCL1ko_DAPT", "WT_-")]
+
+transfer.anchors <- map(seur_objs, function(s_obj) {
+  message(names(s_obj))
+  DefaultAssay(s_obj) <- "integrated"
+  transfer.anchors <- FindTransferAnchors(
+    reference = seur_obj,
+    query = s_obj,
+    normalization.method = "SCT",
+    dims = seur_obj@misc$nb_PCs,
+    reference.reduction = "pca"
+  )
+})
+
+names(transfer.anchors) <- names(seur_objs)
+```
+
+
+### Mapping ASCL1ko_DAPT on WT_DAPT
+Now we will map the ASCL1ko_DAPT data on WT_DAPT and choose to transfer the cluster number assignment along with cell state assignment. 
+
+```{r results='hide'}
+seur_objs <- map2(seur_objs, transfer.anchors, function(s_obj, s_anchors) {
+  s_obj <- MapQuery(anchorset = s_anchors, reference = seur_obj, query = s_obj,
+                 refdata = list(celltype = "group_cell_classification_res.1",
+                                celltype2 = "cell_classification_res.1"),
+                 reference.reduction = "pca", reduction.model = "umap")
+})
+```
+
+
+```{r fig.height=16, fig.width=15, message=FALSE, warning=FALSE, results="hide",fig.keep="all"}
+p1 <- map(DimPlot(seur_obj,
+            label = TRUE,
+            group.by = c("group_cell_classification_res.1", "cell_classification_res.1"), 
+            repel = TRUE,
+            combine = FALSE),
+          ~.x +
+            NoLegend() +
+            coord_fixed(ratio = 1) +
+            scale_x_discrete(breaks = NULL) +
+            scale_y_discrete(breaks = NULL)) %>% 
+        ggarrange(
+        plotlist = .,
+        align = "hv",
+        ncol = 2,
+        nrow = 1
+        ) %>%
+        annotate_figure(top = text_grob(
+          "WT_DAPT",
+          face = "bold",
+          size = 16
+        ))
+
+pList <- imap(seur_objs, function(s_obj, s_name) {
+  map(DimPlot(s_obj,
+            label = TRUE,
+            group.by = c("predicted.celltype","predicted.celltype2"),
+            reduction = "ref.umap", 
+            repel = TRUE,
+            combine = FALSE),
+          ~ .x +
+            NoLegend() +  
+            coord_fixed(ratio = 1) +
+            scale_x_discrete(breaks = NULL) +
+            scale_y_discrete(breaks = NULL)) %>% 
+          ggarrange(
+          plotlist = .,
+          align = "hv",
+          ncol = 2
+          ) %>%
+          annotate_figure(top = text_grob(
+            s_name,
+            face = "bold",
+            size = 16
+          ))
+})
+
+pList$WT_DAPT <- p1
+ggarrange(plotlist = pList,
+          ncol = 1,
+           align = "hv")
+```
+
+### Prediction score
+We will investigate the prediction score for the label transfer.
+Looking at the histogram it looks like the group cell state assignment looks very robust however the cluster number assignment have a minor bimodal distribution of prediction score with certain cells having prediction score of ~0.5.
+
+```{r}
+imap(seur_objs, function(s_obj, s_name){
+  ggplot(s_obj@meta.data, aes(predicted.celltype.score)) +
+    geom_histogram(bins = 100) +
+    ggtitle(s_name)
+}) %>% 
+ggarrange(
+        plotlist = .,
+        align = "hv",
+        ncol = 2,
+        nrow = 1
+        ) %>%
+        annotate_figure(top = text_grob(
+          "predicted.celltype",
+          face = "bold",
+          size = 16
+        ))  
+
+imap(seur_objs, function(s_obj, s_name){
+  ggplot(s_obj@meta.data, aes(predicted.celltype2.score)) +
+    geom_histogram(bins = 100) +
+    ggtitle(s_name)
+}) %>% 
+ggarrange(
+        plotlist = .,
+        align = "hv",
+        ncol = 2,
+        nrow = 1
+        ) %>%
+        annotate_figure(top = text_grob(
+          "predicted.celltype2",
+          face = "bold",
+          size = 16
+        ))  
+```
+
+
+```{r}
+write_rds(
+  seur_obj,
+  str_c(
+    output_dirs["R_objects"],
+    "integrated_seurat_object_cell_state_assign_RNA_WT_DAPT.RDS",
+    sep = "/"
+  )
+)
+# seur_objs$WT_DAPT <- seur_obj
+write_rds(
+  seur_objs,
+  str_c(
+    output_dirs["R_objects"],
+    "integrated_seurat_object_cell_state_assign_RNA_all.RDS",
+    sep = "/"
+  )
+)
+
+
+# seur_objs <- read_rds(
+#   str_c(
+#     output_dirs["R_objects"],
+#     "integrated_seurat_object_cell_state_assign_RNA_all.RDS",
+#     sep = "/"
+#   )
+# )
+# seur_obj <- read_rds(
+#   str_c(
+#     output_dirs["R_objects"],
+#     "integrated_seurat_object_cell_state_assign_RNA_WT_DAPT.RDS",
+#     sep = "/"
+#   )
+# )
+```
+
+
+
+
+```{r eval = TRUE, echo=TRUE, include=TRUE}
+# Transferring metadata across to the integrated dataset
+
+## Integrated data
+integ_seur_objs <-
+  read_rds(
+    here(
+      "data",
+      "derived_data",
+      "R_objects",
+      "2-1.Integration_of_sampleGroups_remDblt",
+      "integrated_seurat_object_pre-processed.RDS"
+    )
+  )
+
+```
+
+
+```{r}
+
+celltype.metadata <- map(seur_objs, ~.x[[]] %>% 
+              select(orig.ident, predicted.celltype) %>% 
+              rename(merged.celltype = predicted.celltype) %>% 
+              rownames_to_column("barcode") %>% 
+              mutate(barcode.ident = paste(gsub("_.+", "", barcode, perl = T), orig.ident, sep = "_")) %>% 
+              select(-barcode)) %>% 
+  bind_rows()
+
+celltype.metadata <- seur_obj[[]] %>% 
+  select(orig.ident, group_cell_classification_res.1) %>% 
+  rename(merged.celltype = group_cell_classification_res.1) %>% 
+  rownames_to_column("barcode") %>% 
+  mutate(barcode.ident = paste(gsub("_.+", "", barcode, perl = T), orig.ident, sep = "_")) %>% 
+  select(-barcode) %>% 
+  bind_rows(celltype.metadata) 
+
+
+integ_seur_objs <- map(integ_seur_objs, function(s_obj) {
+  new_meta <- s_obj[[]] %>% 
+      select(orig.ident) %>% 
+      rownames_to_column("barcode") %>% 
+      mutate(barcode.ident = paste(gsub("_.+", "", barcode, perl = T), orig.ident, sep = "_")) %>% 
+      left_join(celltype.metadata) %>% 
+      select(-orig.ident, -barcode.ident) %>% 
+      column_to_rownames("barcode")
+  s_obj <- AddMetaData(s_obj, new_meta, col.name = "merged.celltype")
+  s_obj
+})
+
+```
+
+```{r}
+write_rds(integ_seur_objs, str_c(output_dirs["R_objects"], "integrated_seurat_object_sampleGroups_celltype.RDS", sep = "/"), compress = "gz")
+```
+
+
+```{r eval = TRUE, echo=TRUE, include=TRUE, fig.height=8, fig.width=8}
+imap(test, function(seur_obj, seur_name) {
+    patchwork::wrap_plots(
+      (DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "merged.celltype", 
+            ncol = 1) +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL)),
+      (DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "treatment", 
+            ncol = 1) +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL)),
+      ncol = 1
+    ) +
+    patchwork::plot_annotation(seur_name)
+}) 
+```
+
