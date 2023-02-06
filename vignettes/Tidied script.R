@@ -6,6 +6,10 @@ library(RColorBrewer)
 library(Seurat)
 library(readxl)
 library(writexl)
+library(GenomeInfoDb)
+library(DESeq2)
+library(ggrepel)
+library(broom)
 
 #Load Seurat objects from same folder as script
 temp_seur <- readRDS(file = 'integrated_seurat_object_cell_state_assign_RNA_all.RDS')
@@ -145,3 +149,191 @@ write_xlsx(wt_seur_noDAPT_table, 'integrated_wt_cluster counts.xlsx')
 double_table <- as_tibble(double_seur@meta.data) %>% select(orig.ident, group_cell_classification_res.1, genotype)
 double_table %<>% group_by(orig.ident, group_cell_classification_res.1, genotype) %>% summarise(n())
 write_xlsx(double_table, 'integrated_cluster counts.xlsx')
+
+#Subsetting our Seurat object to obtain pseudobulk count matrices for DESeq2
+double_seur$id <- case_when(as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A21' ~ 'WT_1',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A22' ~ 'WT_2',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A23' ~ 'KO_1',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A24' ~ 'KO_2',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A26' ~ 'WT_3',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A27' ~ 'KO_3',
+                            TRUE ~ 'Failed')
+double_seur$id.celltype <- paste(double_seur$id, double_seur$merged.celltype)
+##Warning! Next step may take a while
+subsets <- SplitObject(double_seur, split.by = 'id.celltype')
+##Summing the RNA counts for each subset - will also take a while
+t2 <- NULL
+for(i in unique(double_seur$id.celltype)){
+  t = apply(subsets[[i]]@assays$RNA@counts, 1, sum)
+  t2 = cbind(t2, as.numeric(t))
+}
+pseudobulk = as_tibble(cbind(names(t), t2))
+names(pseudobulk) = c("gene", unique(double_seur$id.celltype))
+rm(t2, i, t)
+##Making the DESeq2 objects. Will have to round the numbers to obtain integers, as Alevin gives non-integer RNA counts.
+genotype <- c('WT', 'WT', 'WT', 'KO', 'KO', 'KO')
+CP <- pseudobulk %>% select(`WT_1 Cycling Progenitors`,`WT_2 Cycling Progenitors`,`WT_3 Cycling Progenitors`,
+                            `KO_1 Cycling Progenitors`,`KO_2 Cycling Progenitors`,`KO_3 Cycling Progenitors`)
+CP_anno <- tibble(genotype)
+rownames(CP_anno) <- colnames(CP)
+for(i in 1:6){
+  CP[[i]] <- as.numeric(CP[[i]])
+}
+CP <- round(CP)
+rownames(CP) <- pseudobulk$gene
+CP_bulk <- DESeqDataSetFromMatrix(countData = CP,
+                                  colData = CP_anno,
+                                  design = ~ genotype)
+CP_bulk$genotype <- relevel(CP_bulk$genotype, ref = 'WT')
+CP_bulk <- DESeq(CP_bulk)
+
+TP <- pseudobulk %>% select(`WT_1 Transitional Progenitors`,`WT_2 Transitional Progenitors`,`WT_3 Transitional Progenitors`,
+                            `KO_1 Transitional Progenitors`,`KO_2 Transitional Progenitors`,`KO_3 Transitional Progenitors`)
+TP_anno <- tibble(genotype)
+rownames(TP_anno) <- colnames(TP)
+for(i in 1:6){
+  TP[[i]] <- as.numeric(TP[[i]])
+}
+TP <- round(TP)
+rownames(TP) <- pseudobulk$gene
+TP_bulk <- DESeqDataSetFromMatrix(countData = TP,
+                                  colData = TP_anno,
+                                  design = ~ genotype)
+TP_bulk$genotype <- relevel(TP_bulk$genotype, ref = 'WT')
+TP_bulk <- DESeq(TP_bulk)
+
+Neu <- pseudobulk %>% select(`WT_1 Neurons`,`WT_2 Neurons`,`WT_3 Neurons`,
+                             `KO_1 Neurons`,`KO_2 Neurons`,`KO_3 Neurons`)
+Neu_anno <- tibble(genotype)
+rownames(Neu_anno) <- colnames(Neu)
+for(i in 1:6){
+  Neu[[i]] <- as.numeric(Neu[[i]])
+}
+Neu <- round(Neu)
+rownames(Neu) <- pseudobulk$gene
+Neu_bulk <- DESeqDataSetFromMatrix(countData = Neu,
+                                  colData = Neu_anno,
+                                  design = ~ genotype)
+Neu_bulk$genotype <- relevel(Neu_bulk$genotype, ref = 'WT')
+Neu_bulk <- DESeq(Neu_bulk)
+
+##Saving and plotting the DESeq2 results
+write.csv(as.data.frame(results(CP_bulk)), 'KO_vs_WT_CP_DESeq2.csv')
+write.csv(as.data.frame(results(TP_bulk)), 'KO_vs_WT_TP_DESeq2.csv')
+write.csv(as.data.frame(results(Neu_bulk)), 'KO_vs_WT_Neu_DESeq2.csv')
+
+CP_DGE <- read_csv('KO_vs_WT_CP_DESeq2.csv',) %>% rename(...1 = 'geneID') %>% na.omit()
+CP_DGE$diffexpressed <- "NO"
+CP_DGE$diffexpressed[CP_DGE$log2FoldChange > 1.5 & CP_DGE$padj < 0.05] <- "UP"
+CP_DGE$diffexpressed[CP_DGE$log2FoldChange < -1.5 & CP_DGE$padj < 0.05] <- "DOWN"
+pdf(file = paste0("ASCL1KO_vs_WT_CP_DGE.pdf"), width = 15, height = 8)
+plot(ggplot(CP_DGE, aes(x = log2FoldChange, y = -log10(padj), col = diffexpressed)) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = -log10(0.05), col = 'red') + geom_vline(xintercept = c(-1.5, 1.5), col = 'red') +
+  theme_classic() + scale_color_manual(values=c("#4d72c0", "black", "#d8021c")))
+dev.off()
+
+TP_DGE <- read_csv('KO_vs_WT_TP_DESeq2.csv',) %>% rename(...1 = 'geneID') %>% na.omit()
+TP_DGE$diffexpressed <- "NO"
+TP_DGE$diffexpressed[TP_DGE$log2FoldChange > 1.5 & TP_DGE$padj < 0.05] <- "UP"
+TP_DGE$diffexpressed[TP_DGE$log2FoldChange < -1.5 & TP_DGE$padj < 0.05] <- "DOWN"
+pdf(file = paste0("ASCL1KO_vs_WT_TP_DGE.pdf"), width = 15, height = 8)
+ggplot(TP_DGE, aes(x = log2FoldChange, y = -log10(padj), col = diffexpressed)) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = -log10(0.05), col = 'red') + geom_vline(xintercept = c(-1.5, 1.5), col = 'red') +
+  theme_classic() + scale_color_manual(values=c("#4d72c0", "black", "#d8021c"))
+dev.off()
+
+Neu_DGE <- read_csv('KO_vs_WT_Neu_DESeq2.csv',) %>% rename(...1 = 'geneID') %>% na.omit()
+Neu_DGE$diffexpressed <- "NO"
+Neu_DGE$diffexpressed[Neu_DGE$log2FoldChange > 1.5 & Neu_DGE$padj < 0.05] <- "UP"
+Neu_DGE$diffexpressed[Neu_DGE$log2FoldChange < -1.5 & Neu_DGE$padj < 0.05] <- "DOWN"
+pdf(file = paste0("ASCL1KO_vs_WT_Neu_DGE.pdf"), width = 15, height = 8)
+ggplot(Neu_DGE, aes(x = log2FoldChange, y = -log10(padj), col = diffexpressed)) + geom_point(size = 0.5) + 
+  geom_hline(yintercept = -log10(0.05), col = 'red') + geom_vline(xintercept = c(-1.5, 1.5), col = 'red') +
+  theme_classic() + scale_color_manual(values=c("#4d72c0", "black", "#d8021c"))
+dev.off()
+
+##Correlation plots between scRNAseq DEGs by celltype and bulk RNAseq DEGs
+#multiplied the log2fc by -1 due to direction of comparison being WT vs KO instead of KO vs WT
+RNA_DGE <- read_delim("NRS_WTvsNRS_ASCL1_KO.deseq2.refseq.results.txt", delim = "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  mutate(bulk_log2FoldChange = as.numeric(log2FoldChange) * -1) %>%  na.omit() 
+CP <- inner_join(CP_DGE, RNA_DGE, by = 'geneID')
+TP <- inner_join(TP_DGE, RNA_DGE, by = 'geneID')
+Neu <- inner_join(Neu_DGE, RNA_DGE, by = 'geneID')
+
+df <- list(CP=CP, TP=TP, Neu=Neu)
+rm(TP, CP, Neu)
+for(i in names(df)){
+  df[[i]]$diffexpressed <- 'ns'
+  df[[i]]$diffexpressed[df[[i]]$padj.x < 0.05 & df[[i]]$padj.y < 0.05] <- 'Both padj<0.05'
+  df[[i]]$diffexpressed[df[[i]]$padj.x < 0.05 & df[[i]]$padj.y >= 0.05] <- 'sc padj<0.05'
+  df[[i]]$diffexpressed[df[[i]]$padj.x >= 0.05 & df[[i]]$padj.y < 0.05] <- 'bulk padj<0.05'
+  }
+
+pdf(file = paste0("ASCL1KO_vs_WT_CP_TP_Neurons_scRNAseq_vs_bulk_correlation.pdf"), width = 15, height = 8)
+for(i in names(df)){
+  cort <- cor.test(df[[i]]$log2FoldChange.x, df[[i]]$bulk_log2FoldChange)
+  plot(ggplot(df[[i]], aes(y = log2FoldChange.x, x = bulk_log2FoldChange, col = diffexpressed)) + geom_point(size = 0.05) +
+    geom_hline(yintercept = 0, size = 0.2) + geom_vline(xintercept = 0, size = 0.2) + 
+    geom_smooth(method = "lm",
+                colour = "black",
+                linetype = 2,
+                size = 0.2) +
+    annotate("text", x = -5.5, y = 5, 
+             label = paste("italic(r)(", cort$parameter, ")==", cort$estimate, "~~italic(p)==", cort$p.value), 
+             parse = TRUE,
+             size = 3) + 
+    scale_color_manual(values=c("orange", "#d8021c", "black", 'darkgreen')))
+  }
+dev.off()
+
+##Re-doing the above, but using pseudobulk of the entire replicate, instead of pseudobulks by celltypes
+pseu_DGE <- read_csv('KO_vs_WT_pseudobulk_DESeq2.csv') %>% rename(...1 = 'geneID') %>% na.omit()
+#Multiplied the bulk_log2fc as the file's direction of comparison is WT vs KO, and not KO vs WT
+RNA_DGE <- read_delim("NRS_WTvsNRS_ASCL1_KO.deseq2.refseq.results.txt", delim = "\t", escape_double = FALSE, trim_ws = TRUE) %>% 
+  mutate(bulk_log2FoldChange = as.numeric(log2FoldChange) * -1) %>%  na.omit() 
+pseu <- inner_join(pseu_DGE, RNA_DGE, by = 'geneID')
+pseu$diffexpressed <- 'ns'
+pseu$diffexpressed[pseu$padj.x < 0.05 & abs(pseu$log2FoldChange.x) > log2(1.5)] <- 'sc padj<0.05, log2Fc > log2(1.5)'
+pseu$diffexpressed[pseu$padj.y < 0.05 & abs(pseu$bulk_log2FoldChange) > log2(1.5)] <- 'bulk padj<0.05, log2Fc > log2(1.5)'
+pseu$diffexpressed[pseu$padj.x < 0.05 & pseu$padj.y < 0.05 & abs(pseu$log2FoldChange.x) > log2(1.5) & abs(pseu$bulk_log2FoldChange) > log2(1.5)] <- 'Both padj<0.05, log2Fc > log2(1.5)'
+pdf(file = paste0("ASCL1KO_vs_WT_scRNAseq_vs_bulk_correlation.pdf"), width = 8, height = 8)
+cort <- cor.test(pseu$log2FoldChange.x, pseu$bulk_log2FoldChange)
+plot(ggplot(pseu, aes(y = log2FoldChange.x, x = bulk_log2FoldChange, col = diffexpressed)) + geom_point(size = 0.05) +
+       geom_hline(yintercept = 0, size = 0.2) + geom_vline(xintercept = 0, size = 0.2) + 
+       geom_smooth(method = "lm",
+                   colour = "black",
+                   linetype = 2,
+                   size = 0.2) +
+       annotate("text", x = -5.5, y = 5, 
+                label = paste("italic(r)(", cort$parameter, ")==", cort$estimate, "~~italic(p)==", cort$p.value), 
+                parse = TRUE,
+                size = 3) + 
+       scale_color_manual(values=c("orange", "#d8021c", "black", 'darkgreen')))
+dev.off()
+
+### Preparing the WT-only pseudobulk for Cristina to do GO analysis with it as background
+temp_seur <- readRDS(file = 'integrated_seurat_object_sampleGroups_celltype.RDS')
+double_seur <- temp_seur[[2]]
+DefaultAssay(double_seur) <- 'RNA'
+double_seur$merged.celltype <- str_replace(double_seur$merged.celltype, 'ASCL1 Progenitors', 'Transitional Progenitors')
+double_seur$id <- case_when(as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A21' ~ 'WT_1',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A22' ~ 'WT_2',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A23' ~ 'KO_1',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A24' ~ 'KO_2',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A26' ~ 'WT_3',
+                            as.vector(double_seur[['orig.ident']][[1]]) == 'TAN2457A27' ~ 'KO_3',
+                            TRUE ~ 'Failed')
+subsets <- SplitObject(double_seur, split.by = 'id')
+t2 <- NULL
+for(i in unique(double_seur$id)){
+  t = apply(subsets[[i]]@assays$RNA@counts, 1, sum)
+  t2 = cbind(t2, as.numeric(t))
+}
+pseudobulk = as_tibble(cbind(names(t), t2))
+names(pseudobulk) = c("gene", unique(double_seur$id))
+rm(t2, i, t)
+for(i in 2:7){
+  pseudobulk[[i]] <- as.numeric(pseudobulk[[i]]) %>% round()
+}
+pseudobulk2 <- select(pseudobulk, 'gene','WT_1','WT_2','WT_3') %>% subset(WT_1 > 10|WT_2 > 10|WT_3 > 10)
+write_csv(pseudobulk2, 'WT_pseudobulk_for_background_filtered.csv')
