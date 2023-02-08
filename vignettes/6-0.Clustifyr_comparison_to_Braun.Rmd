@@ -1,0 +1,598 @@
+---
+title: "op212 - ASCL1-KO cortical neuron differentiation day 24 with Notch inhibition"
+author: "Stephanie Strohbuecker"
+subtitle: Preparing published dataset
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE,
+                      eval.after = "fig.cap",
+                      fig.width = 12)
+```
+
+To address reviewer's comments the single-cell RNA-seq dataset produced in-house will be compared to a publicly available human fetal brain dataset.
+The dataset was described in this [preprint](https://www.biorxiv.org/content/10.1101/2022.10.24.513487v1) with the data being available as a [h5 object](https://github.com/linnarsson-lab/developing-human-brain/).
+
+Not all samples in this dataset are relevant to be compared to the in-house dataset, we therefore subset it to only the relevant samples.
+
+We converted the available `.h5` file to a [scanpy](https://scanpy.readthedocs.io/en/stable/)-compliant `AnnData` object which can be converted to a Seurat-compliant `.h5seurat` object which can then be used with [clustifyr](https://www.bioconductor.org/packages/release/bioc/html/clustifyr.html).
+
+The conversion to the `AnnData` object is described in the python script `hdf5_to_AnnData.ipynb`.
+To convert the `.h5ad` to the `.h5seurat` format, we follow this [vignette](https://mojaveazure.github.io/seurat-disk/articles/convert-anndata.html).
+
+```{r, eval=FALSE}
+# Sys.setenv(PATH = paste(Sys.getenv("PATH"), "/camp/apps/eb/software/Pandoc/2.13/bin", sep = ":"))
+rmarkdown::render("/camp/stp/babs/working/strohbs/projects/guillemotf/oana.paun/op216_scRNAseq_ASCL1KO_cortical_neural_diff_day24/vignettes/1-0.Clustifyr_comparison_to_Braun.Rmd", output_file = "/camp/stp/babs/working/strohbs/projects/guillemotf/oana.paun/op216_scRNAseq_ASCL1KO_cortical_neural_diff_day24/vignettes/1-0.Clustifyr_comparison_to_Braun.html")
+```
+
+
+```{r}
+RMD_file_name <- "1-0.Clustifyr_comparison_to_Braun"
+```
+
+
+```{r message=FALSE}
+# Libraries
+library(tidyverse)
+library(here)
+
+library(ggpubr)
+
+library(Seurat)
+library(SeuratDisk)
+
+library(clustifyr)
+library(ComplexHeatmap)
+```
+
+
+```{r message=FALSE, warning=FALSE}
+# load_all() makes the functions in the R/ directory available for usage
+pkgload::load_all()
+```
+
+```{r, message=FALSE, warning=FALSE}
+adata_h5ad <- here("data", "raw_data", "published_data", "Braun_AnnData_subset.h5ad")
+seur_h5 <- here("data", "raw_data", "published_data", "Braun_AnnData_subset.h5seurat")
+# adata_h5ad <- here("data", "raw_data", "published_data", "Braun_AnnData_full_subset.h5ad")
+
+seur_objs <-
+  read_rds(
+    here(
+      "data",
+      "raw_data",
+      "seurat_objects_ghanata",
+      "3-10.cell_state_labelTransfer_of_WT_DAPT_remDblt",
+      "integrated_seurat_object_cell_state_assign_RNA_WT_DAPT.RDS"
+    )
+  )
+
+sample_metadata <- read_csv(here("data", "raw_data", "published_data", "sample_metadata.csv")) %>% 
+  select(-1) %>% 
+  mutate(cell_index = row_number() -1 ) %>% 
+  mutate(across(.cols = c(cell_class, clusters), ~ as_factor(.))) %>%
+  rename(braun_clusters = clusters) %>% 
+  # select(cell_index, braun_clusters)%>% 
+  column_to_rownames("cell_index")
+
+gene_symbols <- read_csv(here("data", "raw_data", "published_data", "gene_var.csv")) %>% 
+  select(-1)
+
+marker_genes <-
+  readxl::read_excel(here(
+    "data",
+    "raw_data",
+    "project_docs",
+    "Updated_Cell_type_genelists.xlsx"
+  )) %>%
+  select(-Pseudotime) %>% 
+  pivot_longer(cols = everything(), names_to = "cell_state", values_to = "gene_id") %>% 
+  filter(!is.na(gene_id))
+```
+
+
+```{r}
+# Path to output and figures directories
+output_dirs <-
+  str_c(
+    here(),
+    "data/derived_data",
+    c("Tables", "R_objects", "Figures"),
+    RMD_file_name,
+    sep = "/"
+  ) %>%
+  set_names(c("Tables", "R_objects", "Figures"))
+
+walk(output_dirs, ~
+       generate_directories(.x))
+```
+
+```{r}
+# Convert(adata_h5ad, dest = "h5seurat", overwrite = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+pub_seur_obj <- LoadH5Seurat(seur_h5, meta.data = FALSE, misc = FALSE)
+```
+
+```{r}
+pub_seur_obj <- AddMetaData(pub_seur_obj, sample_metadata)
+```
+
+
+```{r}
+pub_seur_obj <- RenameCells(pub_seur_obj, add.cell.id = "Braun")
+```
+
+
+```{r}
+pub_seur_obj$cell_class <- pub_seur_obj@meta.data %>% 
+  as_tibble() %>% 
+  mutate(cell_class = if_else(is.na(cell_class), "unknown", as.character(cell_class))) %>% 
+  pull(cell_class)
+
+pub_seur_obj$braun_clusters <- pub_seur_obj@meta.data %>% 
+  as_tibble() %>% 
+  mutate(braun_clusters = if_else(is.na(braun_clusters), "unknown", as.character(braun_clusters))) %>% 
+  pull(braun_clusters)
+```
+
+# Visualisation of the in-house dataset
+
+As input into clustifyr we use a previously generated Seurat object for DIV24 neural cultures treated with DAPT (WT):
+```{r, fig.height=10}
+ggarrange(
+DimPlot(seur_objs,
+        label = FALSE,
+        group.by = "group_cell_classification_res.1") +
+  coord_fixed(ratio = 1) +
+  scale_x_discrete(breaks = NULL) +
+  scale_y_discrete(breaks = NULL) +
+  ggtitle("DIV24 neural cultures treated with DAPT") +
+  labs(subtitle = "annotated clusters"),
+
+DimPlot(seur_objs,
+        label = FALSE,
+        group.by = "integrated_snn_res.1") +
+  coord_fixed(ratio = 1) +
+  scale_x_discrete(breaks = NULL) +
+  scale_y_discrete(breaks = NULL) +
+  ggtitle("DIV24 neural cultures treated with DAPT") +
+  labs(subtitle = "resolution 1"))
+```
+
+
+
+```{r}
+seur_objs@meta.data$group_cell_classification_res.1 <-
+  seur_objs@meta.data %>%
+  as_tibble() %>%
+  mutate(group_cell_classification_res.1 = 
+           str_replace_all(group_cell_classification_res.1,
+                           " ", "_")) %>%
+  pull(group_cell_classification_res.1)
+```
+
+
+# Visualisation of the public datatset
+
+
+```{r fig.height=10, message=FALSE, warning=FALSE}
+Braun_orig_cell <- DimPlot(pub_seur_obj,
+                              label = FALSE,
+                              group.by = "cell_class") +
+  coord_fixed(ratio = 1) +
+  scale_x_discrete(breaks = NULL) +
+  scale_y_discrete(breaks = NULL) +
+  ggtitle("Braun et al: Cell Classes")
+Braun_orig_clusts <-  DimPlot(pub_seur_obj,
+                              label = FALSE,
+                              group.by = "braun_clusters") +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1) +
+  scale_x_discrete(breaks = NULL) +
+  scale_y_discrete(breaks = NULL) +
+  ggtitle("Braun et al: clusters")
+
+ggarrange(Braun_orig_cell,
+          Braun_orig_clusts)
+
+pdf( here(
+    output_dirs[["Figures"]],
+    "subset_of_original_braun_et_al_tsne.pdf"
+  ))
+Braun_orig_cell
+          Braun_orig_clusts
+dev.off()
+```
+
+Braun et al. is missing a set of variable features. We therefore calculated a set of 2000 variable features using the `FindVariableFeatures()` function from Seurat.
+```{r message=FALSE, warning=FALSE}
+pub_seur_obj <- FindVariableFeatures(pub_seur_obj,  selection.method = "vst", nfeatures = 2000)
+```
+
+```{r}
+seur_objs <- list("WT_DAPT" = seur_objs,
+                  "Braun_et_al" = pub_seur_obj)
+```
+
+
+# Calculation of similarities between scRNA datasets and reference data
+
+Using the WT-DAPT in-house generated dataset in combination with the [publicly available dataset](https://www.biorxiv.org/content/10.1101/2022.10.24.513487v1), we transfered cell labels using the published human fetal brain atalas data (Braun et al.) as a reference to transfer the cell type labels to the WT-DAPT dataset.
+
+Using the data above we prepare a reference matrices as input for `clustifyr::clustify()`. These reference expression matrices are generated by averaging per-cell expression data for each cluster.
+To build the reference matrix we use the clustering resolution that was used for the annotation of cell states. For Braun et al. this is the metadata column called "clusters". In both cases, several clusters may have been annotated with the same cell type label subsequently.
+
+Clustifyr may warn that specific cell types may not be classified accurately as the reference dataset does not contain enough cells (10) for this specific cell type.
+```{r}
+ref_mats <- list(
+  # "WT_cell_classification" = seurat_ref(seurat_object = seur_objs$WT_DAPT,
+  #                                       cluster_col = "integrated_snn_res.1"),
+  "Braun_clusters" = seurat_ref(
+    seurat_object = seur_objs$Braun_et_al,
+    cluster_col = "braun_clusters"
+  )#,
+  # "Braun_cell_classes" = seurat_ref(
+  #   seurat_object = seur_objs$Braun_et_al,
+  #   cluster_col = "cell_class"
+  # )
+)
+```
+
+```{r}
+seur_objs$Braun_et_al <- NULL
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+combi_ref <-
+  expand_grid("seur_obj" = names(seur_objs), "ref_mat" = names(ref_mats)) %>%
+  # slice(2, 3) %>%
+  mutate(dr = case_when(
+    seur_obj == "WT_DAPT" ~ "umap",
+    seur_obj == "Braun_et_al" ~ "tsne",
+  )) %>% 
+  group_by(seur_obj) %>% 
+  group_split() %>% 
+  set_names(., map(., ~unique(.x$seur_obj)))
+```
+
+We use the provided cluster information from Braun et al (`clusters` column)
+```{r}
+# use a high clustering resolution for cell state prediction
+seur_objs$WT_DAPT@misc$clustifyr_clustering_resolution <-
+  "integrated_snn_res.1"
+# seur_objs$Braun_et_al@misc$clustifyr_clustering_resolution <-
+#   "braun_clusters"
+```
+
+
+```{r message=FALSE, warning=FALSE}
+clustifyr_res <-
+  map(combi_ref, function(combi_list) {
+    combi_list
+    map(1:NROW(combi_list), ~ {
+      combi <- combi_list %>%
+        slice(.x)
+      res <- clustify(
+        input = seur_objs[[combi$seur_obj]],
+        ref_mat = ref_mats[[combi$ref_mat]],
+        rename_prefix = combi$ref_mat ,
+        cluster_col = seur_objs[[combi$seur_obj]]@misc$clustifyr_clustering_resolution,
+        dr = combi$dr,
+        obj_out = TRUE,
+        per_cell = FALSE,
+        verbose = FALSE
+      )
+      
+      res
+      res_df <- res@meta.data %>%
+        select(starts_with(combi$ref_mat))
+      res_df
+    }) %>%
+      set_names(combi_list$ref_mat)
+  })
+```
+
+```{r message=FALSE, warning=FALSE}
+# generate translation from cluster number to cell state as defined in each dataset
+cluster_to_cell_type_braun <- pub_seur_obj[[]] %>% 
+  select(cell_class, braun_clusters) %>% 
+  distinct() %>% 
+  filter(!is.na(braun_clusters)) %>% 
+  mutate(full_anno = str_c(cell_class, braun_clusters, sep = "_"))
+
+query_translation <- seur_objs$WT_DAPT@meta.data %>% 
+  as_tibble() %>% 
+  select(integrated_snn_res.1,group_cell_classification_res.1) %>% 
+  distinct() %>% 
+  mutate(query_full_anno = str_c(group_cell_classification_res.1, integrated_snn_res.1, sep = "_")) %>% 
+  select(-group_cell_classification_res.1)
+
+cor_mat <-
+  map(combi_ref, function(combi_list) {
+    combi_list
+    map(1:NROW(combi_list), ~ {
+      combi <- combi_list %>%
+        slice(.x)
+      res <- clustify(
+        input = seur_objs[[combi$seur_obj]],
+        ref_mat = ref_mats[[combi$ref_mat]],
+        rename_prefix = combi$ref_mat ,
+        cluster_col = seur_objs[[combi$seur_obj]]@misc$clustifyr_clustering_resolution,
+        dr = combi$dr,
+        obj_out = FALSE,
+        per_cell = FALSE,
+        verbose = FALSE
+      )
+      res %>%
+        as_tibble(rownames = "query_clust") %>%
+        rename_with(.cols = any_of(cluster_to_cell_type_braun$braun_clusters),
+                    ~ recode(
+                      .x,!!!setNames(
+                        cluster_to_cell_type_braun$full_anno,
+                        cluster_to_cell_type_braun$braun_clusters
+                      )
+                    )) %>%
+        left_join(
+          query_translation,
+          by = c("query_clust" = seur_objs[[combi$seur_obj]]@misc$clustifyr_clustering_resolution)
+        ) %>% 
+        select(-query_clust) %>% 
+        arrange(query_full_anno) %>% 
+        column_to_rownames(var = "query_full_anno")
+    }) %>%
+      set_names(combi_list$ref_mat)
+  })
+```
+
+
+Clustifyr calculates Spearman correlations for each cluster in the reference dataset (Braun et al.) and each cluster in the query dataset (WT-DAPT). We can visualise the matrix of the correlation coefficients.
+
+```{r, fig.height=50, fig.width=8, results="hide", fig.keep="all"}
+plot_cor_heatmap(t(cor_mat$WT_DAPT$Braun_clusters),
+                 row_names_gp = gpar(fontsize = 8))
+
+pdf(
+  here(
+    output_dirs[["Figures"]],
+    "correlation_heatmap_for_label_transfer_from_Braun_to_WTDAPT.pdf"
+  ),
+  width = 8,
+  height = 50
+)
+plot_cor_heatmap(t(cor_mat$WT_DAPT$Braun_clusters),
+                 row_names_gp = gpar(fontsize = 8))
+dev.off()
+
+
+
+png(
+  here(
+    output_dirs[["Figures"]],
+    "correlation_heatmap_for_label_transfer_from_Braun_to_WTDAPT.pdf"
+  ),
+  width = 8,
+  height = 50
+)
+plot_cor_heatmap(t(cor_mat$WT_DAPT$Braun_clusters),
+                 row_names_gp = gpar(fontsize = 8))
+dev.off()
+```
+
+For each query cluster, clustifyr transfers the label from the reference cluster with the highest correlation coefficient. Note that an automatic threshold is applied for identity calling. In automatic thresholding mode the cutoff threshold is determined heuristically using 0.8 * highest correlation coefficient among the clusters.
+
+```{r}
+seur_objs <-
+  imap(seur_objs, function(seur_obj, seur_name) {
+    meta_df <- map_dfc(clustifyr_res[[seur_name]], ~{
+      .x
+    })
+    seur_obj <- AddMetaData(seur_obj, metadata = meta_df)
+    seur_obj
+  })
+```
+
+
+```{r}
+cell_class_clusters <- seur_objs$WT_DAPT@meta.data %>% 
+  left_join(cluster_to_cell_type_braun, by = c("Braun_clusters_type" = "braun_clusters")) %>% 
+  pull(cell_class)
+
+seur_objs$WT_DAPT <- AddMetaData(seur_objs$WT_DAPT, cell_class_clusters, col.name = "Braun_clusters_cell_class")
+```
+
+
+We can show the correlation coefficient for the label transfer from Braun et al. to WT-DAPT clusters (i.e. the highest correlation coefficent). Note that the label transfer was performed from `Braun_clusters_type` to `integrated_snn_res.1`.
+```{r}
+seur_objs$WT_DAPT@meta.data %>% 
+  as_tibble() %>% 
+  select(group_cell_classification_res.1, integrated_snn_res.1, contains("Braun")) %>% 
+  distinct() %>% 
+  arrange(group_cell_classification_res.1) %>% 
+  DT::datatable(caption = "Correlation coefficient for the label transfer from Braun_clusters_type to integrated_snn_res.1")
+```
+
+
+```{r, fig.height=12, fig.width=22, results="hide", fig.keep="all"}
+imap(seur_objs, function(seur_obj, seur_name) {
+  ggarrange(
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "Braun_clusters_type") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "Braun_clusters_cell_class") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL),
+    DimPlot(
+      seur_obj,
+      label = FALSE,
+      group.by = seur_obj@misc$clustifyr_clustering_resolution
+    ) +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL) +
+      ggtitle("Clustering resolution used in query"),
+    DimPlot(seur_obj,
+            label = FALSE,
+            group.by = "group_cell_classification_res.1") +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL) +
+      ggtitle("DIV24 neural cultures treated with DAPT") +
+      labs(subtitle = "annotated clusters"),
+    ncol = 2,
+    nrow = 2,
+    align = "hv"
+  ) %>%
+    annotate_figure(top = text_grob(seur_name, face = "bold", size = 18))
+})
+```
+
+Rather than using the cell-class annotation provided by Braun et al., we used their provided cluster information as this leads to more fine-grained annotation of cells. We subsequently use the cell class annotation for each of the detected Braun et al. clusters to annotate the cell types found in the WT-DAPT dataset.
+Based on this approach we identify Radial glia, Neuroblasts, Neuronal IPC (intermediate progenitor cells) and Neurons. 
+ASCL1 progenitors overlap with Neuroblast and Neuronal IPC cell types.
+
+```{r, message=FALSE, warning=FALSE, results="hide"}
+imap(seur_objs, function(seur_obj, seur_name) {
+  groupings_of_interest <-
+    c(
+      "Braun_clusters_type",
+      "Braun_clusters_cell_class",
+      seur_obj@misc$clustifyr_clustering_resolution,
+      "group_cell_classification_res.1"
+    )
+  map(groupings_of_interest, ~ {
+    plot <- DimPlot(seur_obj,
+                    label = FALSE,
+                    group.by = .x) +
+      coord_fixed(ratio = 1) +
+      scale_x_discrete(breaks = NULL) +
+      scale_y_discrete(breaks = NULL)
+    
+    pdf(here(output_dirs[["Figures"]], str_c("WT_DAPT_", .x, ".pdf", sep = "")))
+    plot
+    dev.off()
+  })
+})
+```
+
+Six clusters from the Braun et al dataset were detected in the WT-DAPT dataset. We can highlight those six clusters in the Braun et al. dataset (in their tSNE plot).
+```{r fig.height=20, message=FALSE, warning=FALSE, results="hide", fig.keep="all"}
+found_cell_clusters <- unique(seur_objs$WT_DAPT$Braun_clusters_type)
+
+sel_col_pal <- viridis::viridis(length(found_cell_clusters))
+selected_cells <-
+  subset(pub_seur_obj, subset = braun_clusters %in% found_cell_clusters)[[]] %>%
+  as_tibble(rownames = "cell_id") %>%
+  select(cell_id, braun_clusters) %>% 
+  group_by(braun_clusters) %>%
+  group_split() %>%
+  set_names(., map(., ~ unique(.x$braun_clusters))) %>%
+  map( ~ .x %>% pull(cell_id))
+
+Braun_sel_cell <- DimPlot(
+  pub_seur_obj,
+  label = FALSE,
+  cells.highlight = selected_cells,
+  cols.highlight = sel_col_pal
+) +
+  coord_fixed(ratio = 1) +
+  scale_x_discrete(breaks = NULL) +
+  scale_y_discrete(breaks = NULL) +
+  ggtitle("Braun et al: clusters identified in WT-DAPT")
+
+Braun_orig_clusts <-  DimPlot(pub_seur_obj,
+                              label = FALSE,
+                              group.by = "braun_clusters") +
+  theme(legend.position = "none") +
+  coord_fixed(ratio = 1) +
+  scale_x_discrete(breaks = NULL) +
+  scale_y_discrete(breaks = NULL) +
+  ggtitle("Braun et al: clusters")
+
+Braun_orig_cell <-  DimPlot(pub_seur_obj,
+                            label = FALSE,
+                            group.by = "cell_class") +
+  coord_fixed(ratio = 1) +
+  scale_x_discrete(breaks = NULL) +
+  scale_y_discrete(breaks = NULL) +
+  ggtitle("Braun et al: Classes")
+
+ggarrange(Braun_orig_cell,
+          Braun_orig_clusts,
+          Braun_sel_cell)
+
+pdf(
+  here(
+    output_dirs[["Figures"]],
+    "highlight_clusters_in_braun_et_al_tsne_detected_in_WT_DAPT.pdf"
+  )
+)
+Braun_sel_cell
+dev.off()
+```
+
+As clusters in the WT-DAPT dataset were identified with a small set of marker genes, we can visualise the expression of these marker genes in the Braun et al. dataset.
+(Note for visualisations we scaled the public dataset with the `ScaleData()` function)
+
+```{r}
+marker_genes <- marker_genes %>% 
+  filter(!str_detect(gene_id, "ENSG"))
+```
+
+
+```{r, fig.height=15, fig.width=12, results="hide", fig.keep="all"}
+# braun_clusters cell_class
+DotPlot(pub_seur_obj,
+        group.by =  "cell_class",
+        features = unique(marker_genes$gene_id)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+
+
+Figures can be downloaded in pdf format at the links below.
+
+```{r}
+pdf_files_path <-
+  list.files(output_dirs["Figures"], full.names = TRUE) %>%
+  set_names(basename(.))
+```
+
+```{r, results="asis"}
+xfun::pkg_load2(c('base64enc', 'htmltools', 'mime'))
+
+imap(pdf_files_path, function(file_path, file_text) {
+  xfun::embed_file(file_path,
+                   text = file_text)
+})
+```
+
+# Seurat object
+
+The Seurat objects used for the analysis have been made available as a `.RDS` object. 
+
+When running `read_rds("path/to/1-0.Clustifyr_comparison_to_Braun_seurat_obj_integrated_Braun_clustifyr.RDS")` a named list of Seurat object(s) is loaded into R. 
+The information about the clustifyr-assigned clusters/cellstates can be found in the Seurat meta data in the columns starting with "Braun_".
+
+```{r}
+write_rds(
+  seur_objs,
+  compress = "gz",
+  file = str_c(
+    output_dirs["R_objects"],
+    "seurat_obj_integrated_Braun_clustifyr.RDS",
+    sep = "/"
+  )
+)
+```
